@@ -45,12 +45,15 @@ def save_animal_vector(animal_id: int, vector: list[float]) -> bool:
     es_id = _get_es_id(animal_id)
     if es_id is None:
         return False
-    es.update(
-        index=INDEX_NAME,
-        id=es_id,
-        body={"doc": {"image_vector": vector}}
-    )
-    return True
+    try:
+        es.update(
+            index=INDEX_NAME,
+            id=es_id,
+            body={"doc": {"image_vector": vector}}
+        )
+        return True
+    except Exception:
+        return False
 
 
 def knn_search(vector: list[float], exclude_id: int, k: int = 6) -> list[int]:
