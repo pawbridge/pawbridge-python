@@ -55,6 +55,9 @@ async def generate_embeddings():
             animal_id = animal.get("id")
             image_url = animal.get("image_url")
 
+            if not animal_id:
+                continue
+
             if not image_url:
                 failed_ids.add(animal_id)
                 continue
