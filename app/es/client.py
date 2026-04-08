@@ -1,4 +1,4 @@
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, NotFoundError
 import os
 
 ES_URL = os.getenv("ES_URL", "http://localhost:9200")
@@ -13,12 +13,14 @@ def get_animal_vector(animal_id: int) -> list[float] | None:
     try:
         res = es.get(index=INDEX_NAME, id=str(animal_id))
         return res["_source"].get("image_vector")
-    except Exception:
+    except NotFoundError:
         return None
 
 
 def save_animal_vector(animal_id: int, vector: list[float]) -> bool:
-    """ES에 동물의 image_vector 저장 (MySQL PK = ES _id). 성공 시 True 반환"""
+    """ES에 동물의 image_vector 저장 (MySQL PK = ES _id). 성공 시 True 반환.
+    문서가 없으면 False 반환 (Spring 배치 미실행 또는 타이밍 이슈 → 다음 배치에서 재처리).
+    """
     try:
         es.update(
             index=INDEX_NAME,
@@ -26,7 +28,7 @@ def save_animal_vector(animal_id: int, vector: list[float]) -> bool:
             body={"doc": {"image_vector": vector}}
         )
         return True
-    except Exception:
+    except NotFoundError:
         return False
 
 
