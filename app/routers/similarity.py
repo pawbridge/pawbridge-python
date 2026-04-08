@@ -29,7 +29,8 @@ async def get_similar_animals(req: SimilarRequest):
         vector = await extract_embedding_from_url(req.image_url)
         if vector is None:
             raise HTTPException(status_code=422, detail="이미지 임베딩 추출 실패")
-        save_animal_vector(req.animal_id, vector)
+        if not save_animal_vector(req.animal_id, vector):
+            raise HTTPException(status_code=500, detail="벡터 저장 실패: ES 문서를 찾을 수 없습니다")
 
     return knn_search(vector, exclude_id=req.animal_id)
 
@@ -57,7 +58,9 @@ async def generate_embeddings():
             failed += 1
             continue
 
-        save_animal_vector(animal_id, vector)
-        processed += 1
+        if save_animal_vector(animal_id, vector):
+            processed += 1
+        else:
+            failed += 1
 
     return BatchEmbeddingResponse(processed=processed, failed=failed)

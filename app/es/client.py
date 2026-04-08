@@ -40,16 +40,17 @@ def get_animal_vector(animal_id: int) -> list[float] | None:
         return None
 
 
-def save_animal_vector(animal_id: int, vector: list[float]):
-    """ES에 동물의 image_vector 저장 (MySQL PK → ES _id 변환 후 update)"""
+def save_animal_vector(animal_id: int, vector: list[float]) -> bool:
+    """ES에 동물의 image_vector 저장 (MySQL PK → ES _id 변환 후 update). 성공 시 True 반환"""
     es_id = _get_es_id(animal_id)
     if es_id is None:
-        return
+        return False
     es.update(
         index=INDEX_NAME,
         id=es_id,
         body={"doc": {"image_vector": vector}}
     )
+    return True
 
 
 def knn_search(vector: list[float], exclude_id: int, k: int = 6) -> list[int]:
