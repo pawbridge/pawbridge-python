@@ -8,7 +8,7 @@ import io
 # 모델 초기화 (앱 시작 시 한 번만 로드)
 _weights = MobileNet_V3_Large_Weights.DEFAULT
 _model = mobilenet_v3_large(weights=_weights)
-_model.classifier = torch.nn.Identity()  # 분류 레이어 제거 → 1280차원 벡터 출력
+_model.classifier = torch.nn.Sequential(_model.classifier[0])  # Linear(960→1280)만 유지 → 1280차원 벡터 출력
 _model.eval()
 
 # 이미지 전처리 파이프라인
