@@ -39,28 +39,39 @@ async def get_similar_animals(req: SimilarRequest):
 async def generate_embeddings():
     """
     image_vector가 없는 동물들의 임베딩을 일괄 생성하여 ES에 저장
-    - Spring Batch 완료 후 호출하거나 수동으로 호출
+    - 처리할 동물이 없거나 모두 실패할 때까지 반복
     """
-    animals = get_animals_without_vector(size=200)
-    processed = 0
-    failed = 0
+    total_processed = 0
+    failed_ids: set = set()
 
-    for animal in animals:
-        animal_id = animal.get("id")
-        image_url = animal.get("image_url")
+    while True:
+        animals = get_animals_without_vector(size=200)
+        if not animals:
+            break
 
-        if not image_url:
-            failed += 1
-            continue
+        batch_processed = 0
 
-        vector = await extract_embedding_from_url(image_url)
-        if vector is None:
-            failed += 1
-            continue
+        for animal in animals:
+            animal_id = animal.get("id")
+            image_url = animal.get("image_url")
 
-        if save_animal_vector(animal_id, vector):
-            processed += 1
-        else:
-            failed += 1
+            if not image_url:
+                failed_ids.add(animal_id)
+                continue
 
-    return BatchEmbeddingResponse(processed=processed, failed=failed)
+            vector = await extract_embedding_from_url(image_url)
+            if vector is None:
+                failed_ids.add(animal_id)
+                continue
+
+            if save_animal_vector(animal_id, vector):
+                total_processed += 1
+                batch_processed += 1
+                failed_ids.discard(animal_id)
+            else:
+                failed_ids.add(animal_id)
+
+        if batch_processed == 0:
+            break
+
+    return BatchEmbeddingResponse(processed=total_processed, failed=len(failed_ids))
