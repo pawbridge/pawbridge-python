@@ -9,6 +9,7 @@ router = APIRouter()
 class SimilarRequest(BaseModel):
     animal_id: int
     image_url: str
+    species: str | None = None
 
 
 class BatchEmbeddingResponse(BaseModel):
@@ -32,7 +33,7 @@ async def get_similar_animals(req: SimilarRequest):
         if not save_animal_vector(req.animal_id, vector):
             raise HTTPException(status_code=500, detail="벡터 저장 실패: ES 문서를 찾을 수 없습니다")
 
-    return knn_search(vector, exclude_id=req.animal_id)
+    return knn_search(vector, exclude_id=req.animal_id, species=req.species)
 
 
 @router.post("/batch/embeddings", response_model=BatchEmbeddingResponse)
