@@ -46,7 +46,7 @@ async def generate_embeddings():
     failed_ids: set = set()
 
     while True:
-        animals = get_animals_without_vector(size=200)
+        animals = get_animals_without_vector(size=200, exclude_ids=list(failed_ids))
         if not animals:
             break
 
@@ -74,8 +74,5 @@ async def generate_embeddings():
                 failed_ids.discard(animal_id)
             else:
                 failed_ids.add(animal_id)
-
-        if batch_processed == 0:
-            break
 
     return BatchEmbeddingResponse(processed=total_processed, failed=len(failed_ids))
