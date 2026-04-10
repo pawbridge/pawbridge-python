@@ -87,7 +87,10 @@ def get_animals_without_vector(size: int = 100, exclude_ids: list[int] | None = 
             "query": {
                 "bool": {
                     "must_not": must_not,
-                    "filter": {"exists": {"field": "image_url"}}
+                    "filter": [
+                    {"exists": {"field": "image_url"}},
+                    {"exists": {"field": "id"}}
+                ]
                 }
             },
             "_source": ["id", "image_url"],
