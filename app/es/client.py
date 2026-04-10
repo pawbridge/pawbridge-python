@@ -73,15 +73,24 @@ def knn_search(vector: list[float], exclude_id: int, species: str | None = None,
     ][:k]
 
 
-def get_animals_without_vector(size: int = 100) -> list[dict]:
-    """image_vector가 없는 동물 목록 조회 (배치용)"""
+def get_animals_without_vector(size: int = 100, exclude_ids: list[int] | None = None) -> list[dict]:
+    """image_vector가 없는 동물 목록 조회 (배치용)
+    exclude_ids: 임베딩 추출 실패한 ID 제외 — 동일 배치 반복 방지
+    """
+    must_not = [{"exists": {"field": "image_vector"}}]
+    if exclude_ids:
+        must_not.append({"terms": {"id": exclude_ids}})
+
     res = es.search(
         index=INDEX_NAME,
         body={
             "query": {
                 "bool": {
-                    "must_not": {"exists": {"field": "image_vector"}},
-                    "filter": {"exists": {"field": "image_url"}}
+                    "must_not": must_not,
+                    "filter": [
+                    {"exists": {"field": "image_url"}},
+                    {"exists": {"field": "id"}}
+                ]
                 }
             },
             "_source": ["id", "image_url"],
