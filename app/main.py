@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routers import similarity
+from app.routers import chatbot, similarity
 
 app = FastAPI(
     title="Pawbridge AI Service",
@@ -8,6 +8,7 @@ app = FastAPI(
 )
 
 app.include_router(similarity.router, prefix="/api/v1/animals", tags=["similarity"])
+app.include_router(chatbot.router, prefix="/internal/chatbot", tags=["chatbot"])
 
 
 @app.get("/health")
