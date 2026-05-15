@@ -1,4 +1,7 @@
-class StubChatbotProvider:
+from app.services.chatbot.provider import ChatbotProvider
+
+
+class StubChatbotProvider(ChatbotProvider):
     name = "stub"
 
     async def generate_answer(self, prompt: str) -> str:

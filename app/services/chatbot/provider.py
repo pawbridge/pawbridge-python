@@ -1,8 +1,6 @@
 import os
 from abc import ABC, abstractmethod
 
-from app.services.chatbot.stub_provider import StubChatbotProvider
-
 
 class ChatbotProvider(ABC):
     name: str
@@ -23,6 +21,8 @@ class NotImplementedChatbotProvider(ChatbotProvider):
 def get_chatbot_provider() -> ChatbotProvider:
     provider_name = os.getenv("LLM_PROVIDER", "stub").strip().lower() or "stub"
     if provider_name == "stub":
+        from app.services.chatbot.stub_provider import StubChatbotProvider
+
         return StubChatbotProvider()
     if provider_name in {"gemini", "openai"}:
         return NotImplementedChatbotProvider(provider_name)
