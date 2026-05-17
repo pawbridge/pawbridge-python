@@ -9,7 +9,7 @@ from app.services.chatbot.provider import (
     ChatbotProviderUpstreamError,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 
 class GeminiChatbotProvider(ChatbotProvider):
