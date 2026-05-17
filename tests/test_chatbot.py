@@ -2,7 +2,7 @@ import os
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -91,11 +91,34 @@ class ChatbotApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
 
-    def test_chatbot_message_returns_501_for_gemini_provider_in_step_1(self):
+    def test_chatbot_message_returns_500_for_gemini_provider_without_api_key(self):
         with patch.dict(os.environ, {"INTERNAL_API_KEY": "test-key", "LLM_PROVIDER": "gemini"}, clear=False):
             response = self.post_message(headers={"X-Internal-Api-Key": "test-key"})
 
-        self.assertEqual(response.status_code, 501)
+        self.assertEqual(response.status_code, 500)
+
+    def test_chatbot_message_returns_200_for_gemini_provider_with_mocked_call(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INTERNAL_API_KEY": "test-key",
+                    "LLM_PROVIDER": "gemini",
+                    "GEMINI_API_KEY": "gemini-key",
+                },
+                clear=False,
+            ),
+            patch(
+                "app.services.chatbot.gemini_provider.GeminiChatbotProvider.generate_answer",
+                new=AsyncMock(return_value="Gemini answer"),
+            ),
+        ):
+            response = self.post_message(headers={"X-Internal-Api-Key": "test-key"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["provider"], "gemini")
+        self.assertEqual(body["answer"], "Gemini answer")
 
     def test_chatbot_message_returns_501_for_openai_provider_in_step_1(self):
         with patch.dict(os.environ, {"INTERNAL_API_KEY": "test-key", "LLM_PROVIDER": "openai"}, clear=False):
