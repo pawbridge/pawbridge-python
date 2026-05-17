@@ -19,6 +19,7 @@ sys.modules["app.es.client"] = es_client_module
 
 from app.main import app
 from app.services.chatbot.gemini_provider import GeminiChatbotProvider
+from app.services.chatbot.prompt_builder import build_prompt
 from app.services.chatbot.provider import ChatbotProviderUpstreamError
 
 
@@ -127,6 +128,19 @@ class ChatbotApiTest(unittest.TestCase):
 
         with self.assertRaises(ChatbotProviderUpstreamError):
             GeminiChatbotProvider._raise_if_response_truncated(response_body)
+
+    def test_prompt_avoids_repeated_generic_safety_disclaimer(self):
+        class AnimalContext:
+            def model_dump(self):
+                return {"species": "CAT", "age": "2025"}
+
+        prompt = build_prompt(AnimalContext(), [], "이 고양이 어떻게 키워요?")
+
+        self.assertIn("보호소 문의, 수의사 상담 같은 일반적인 안전 고지 문구를 반복하지 마세요", prompt)
+        self.assertIn("safetyNotice는 서버가 별도로 붙입니다", prompt)
+        self.assertIn("사용자의 실제 질문에 대한 답을 먼저", prompt)
+        self.assertIn("필요한 경우에만 문단을 나누세요", prompt)
+        self.assertNotIn("보호소나 수의사 확인 권고는 매번", prompt)
 
     def test_chatbot_message_returns_501_for_openai_provider_in_step_1(self):
         with patch.dict(os.environ, {"INTERNAL_API_KEY": "test-key", "LLM_PROVIDER": "openai"}, clear=False):
