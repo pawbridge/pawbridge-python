@@ -18,6 +18,8 @@ es_client_module.get_animals_without_vector = None
 sys.modules["app.es.client"] = es_client_module
 
 from app.main import app
+from app.services.chatbot.gemini_provider import GeminiChatbotProvider
+from app.services.chatbot.provider import ChatbotProviderUpstreamError
 
 
 class ChatbotApiTest(unittest.TestCase):
@@ -119,6 +121,12 @@ class ChatbotApiTest(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["provider"], "gemini")
         self.assertEqual(body["answer"], "Gemini answer")
+
+    def test_gemini_provider_rejects_truncated_response(self):
+        response_body = {"candidates": [{"finishReason": "MAX_TOKENS"}]}
+
+        with self.assertRaises(ChatbotProviderUpstreamError):
+            GeminiChatbotProvider._raise_if_response_truncated(response_body)
 
     def test_chatbot_message_returns_501_for_openai_provider_in_step_1(self):
         with patch.dict(os.environ, {"INTERNAL_API_KEY": "test-key", "LLM_PROVIDER": "openai"}, clear=False):

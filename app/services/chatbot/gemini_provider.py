@@ -1,4 +1,5 @@
 import os
+import logging
 
 import httpx
 
@@ -7,6 +8,8 @@ from app.services.chatbot.provider import (
     ChatbotProviderConfigurationError,
     ChatbotProviderUpstreamError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiChatbotProvider(ChatbotProvider):
@@ -31,7 +34,10 @@ class GeminiChatbotProvider(ChatbotProvider):
             ],
             "generationConfig": {
                 "temperature": 0.4,
-                "maxOutputTokens": 512,
+                "maxOutputTokens": 1024,
+                "thinkingConfig": {
+                    "thinkingBudget": 0,
+                },
             },
         }
 
@@ -60,10 +66,38 @@ class GeminiChatbotProvider(ChatbotProvider):
         except ValueError as exc:
             raise ChatbotProviderUpstreamError("Gemini response was not valid JSON") from exc
 
+        self._log_response_metadata(response_body)
+        self._raise_if_response_truncated(response_body)
+
         answer = self._extract_answer(response_body)
         if not answer:
             raise ChatbotProviderUpstreamError("Gemini response did not include answer text")
         return answer
+
+    @staticmethod
+    def _raise_if_response_truncated(response_body: dict) -> None:
+        candidates = response_body.get("candidates") or []
+        if not candidates:
+            return
+
+        finish_reason = candidates[0].get("finishReason")
+        if finish_reason == "MAX_TOKENS":
+            raise ChatbotProviderUpstreamError("Gemini response was truncated by token limit")
+
+    @staticmethod
+    def _log_response_metadata(response_body: dict) -> None:
+        candidates = response_body.get("candidates") or []
+        usage = response_body.get("usageMetadata") or {}
+        finish_reason = candidates[0].get("finishReason") if candidates else None
+
+        logger.info(
+            "Gemini response metadata: finishReason=%s promptTokenCount=%s "
+            "candidatesTokenCount=%s totalTokenCount=%s",
+            finish_reason,
+            usage.get("promptTokenCount"),
+            usage.get("candidatesTokenCount"),
+            usage.get("totalTokenCount"),
+        )
 
     @staticmethod
     def _extract_answer(response_body: dict) -> str:
