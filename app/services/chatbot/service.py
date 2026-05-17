@@ -31,9 +31,9 @@ class ChatbotService:
             )
 
     async def create_message(self, req):
-        provider = get_chatbot_provider()
-        prompt = build_prompt(req.animalContext, req.recentMessages, req.question)
         try:
+            provider = get_chatbot_provider()
+            prompt = build_prompt(req.animalContext, req.recentMessages, req.question)
             answer = await provider.generate_answer(prompt)
         except ChatbotProviderConfigurationError as exc:
             raise HTTPException(

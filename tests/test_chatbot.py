@@ -92,7 +92,7 @@ class ChatbotApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
 
     def test_chatbot_message_returns_500_for_gemini_provider_without_api_key(self):
-        with patch.dict(os.environ, {"INTERNAL_API_KEY": "test-key", "LLM_PROVIDER": "gemini"}, clear=False):
+        with patch.dict(os.environ, {"INTERNAL_API_KEY": "test-key", "LLM_PROVIDER": "gemini"}, clear=True):
             response = self.post_message(headers={"X-Internal-Api-Key": "test-key"})
 
         self.assertEqual(response.status_code, 500)

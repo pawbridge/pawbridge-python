@@ -55,7 +55,12 @@ class GeminiChatbotProvider(ChatbotProvider):
         except httpx.HTTPError as exc:
             raise ChatbotProviderUpstreamError("Gemini request failed") from exc
 
-        answer = self._extract_answer(response.json())
+        try:
+            response_body = response.json()
+        except ValueError as exc:
+            raise ChatbotProviderUpstreamError("Gemini response was not valid JSON") from exc
+
+        answer = self._extract_answer(response_body)
         if not answer:
             raise ChatbotProviderUpstreamError("Gemini response did not include answer text")
         return answer
