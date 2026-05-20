@@ -118,7 +118,7 @@ def build_prompt(animal_context, recent_messages, question: str) -> str:
         "보호동물 공고 요약:",
         _format_animal_summary(animal_data),
         "보호동물 공고 원문 정보:",
-        "\n".join(context_lines) if context_lines else "No animal context provided.",
+        "\n".join(context_lines) if context_lines else "제공된 보호동물 공고 원문 정보가 없습니다.",
     ]
     if message_lines:
         sections.extend(["최근 대화:", "\n".join(message_lines)])
