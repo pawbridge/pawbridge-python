@@ -1,0 +1,33 @@
+# Repository and CI metadata
+.git
+.github
+
+# Runtime secrets and local configuration
+.env
+.env.*
+*.env
+!.env.example
+
+# Python virtual environments, caches, and test artifacts
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Local tooling and generated files
+.cache/
+*.log
+.idea/
+.vscode/
+.DS_Store
+
+# Tests are run before the image build and are not required at runtime.
+tests/

@@ -1,0 +1,428 @@
+name: Python AI Image CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "Dockerfile"
+      - "requirements.txt"
+      - ".dockerignore"
+      - ".github/scripts/update_python_ai_image_values.py"
+      - ".github/scripts/test_update_python_ai_image_values.py"
+      - ".github/workflows/python-ai-image-ci.yml"
+  push:
+    branches:
+      - dev
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "Dockerfile"
+      - "requirements.txt"
+      - ".dockerignore"
+      - ".github/scripts/update_python_ai_image_values.py"
+      - ".github/scripts/test_update_python_ai_image_values.py"
+      - ".github/workflows/python-ai-image-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-ai-image-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test and build Python AI image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt pytest
+
+      - name: Run Python test suite
+        run: python -m pytest -q
+
+      - name: Test Python AI image values updater
+        run: >-
+          python -m unittest discover
+          --start-directory .github/scripts
+          --pattern 'test_update_python_ai_image_values.py'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: dorosiya
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and optionally publish Python AI image
+        id: image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: dorosiya/pawbridge-python-ai-service:sha-${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=python-ai-image
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=python-ai-image' || '' }}
+
+      - name: Verify published Python AI image digest
+        if: github.event_name == 'push'
+        env:
+          PYTHON_AI_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PYTHON_AI_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Buildx did not return a valid published image digest" >&2
+            exit 1
+          fi
+          docker buildx imagetools inspect \
+            "dorosiya/pawbridge-python-ai-service@$PYTHON_AI_IMAGE_DIGEST"
+
+      - name: Set up Helm
+        if: github.event_name == 'push'
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.21.4
+
+      - name: Check out Infra repository
+        if: github.event_name == 'push'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pawbridge/pawbridge-infra-k8s
+          ref: dev
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: infra
+          fetch-depth: 0
+
+      - name: Update Python AI image reference
+        if: github.event_name == 'push'
+        env:
+          PYTHON_AI_IMAGE_TAG: sha-${{ github.sha }}
+          PYTHON_AI_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: >-
+          python .github/scripts/update_python_ai_image_values.py
+          infra/environments/dev/values/python-ai-service.yaml
+          --repository dorosiya/pawbridge-python-ai-service
+          --tag "$PYTHON_AI_IMAGE_TAG"
+          --digest "$PYTHON_AI_IMAGE_DIGEST"
+
+      - name: Validate Python AI image Helm override
+        if: github.event_name == 'push'
+        working-directory: ${{ github.workspace }}/infra
+        env:
+          PYTHON_AI_IMAGE_REPOSITORY: dorosiya/pawbridge-python-ai-service
+          PYTHON_AI_IMAGE_TAG: sha-${{ github.sha }}
+          PYTHON_AI_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          values_file="environments/dev/values/python-ai-service.yaml"
+          first_hash="$(git hash-object "$values_file")"
+          python "$GITHUB_WORKSPACE/.github/scripts/update_python_ai_image_values.py" \
+            "$values_file" \
+            --repository "$PYTHON_AI_IMAGE_REPOSITORY" \
+            --tag "$PYTHON_AI_IMAGE_TAG" \
+            --digest "$PYTHON_AI_IMAGE_DIGEST"
+          second_hash="$(git hash-object "$values_file")"
+
+          if [ "$first_hash" != "$second_hash" ]; then
+            echo "Python AI image values update is not idempotent" >&2
+            exit 1
+          fi
+
+          git diff --check
+          helm lint charts/python-ai-service --values "$values_file"
+          rendered="$(helm template python-ai-service charts/python-ai-service \
+            --values "$values_file" \
+            --show-only templates/deployment.yaml)"
+          expected_image="image: \"$PYTHON_AI_IMAGE_REPOSITORY@$PYTHON_AI_IMAGE_DIGEST\""
+
+          if ! grep -Fq "$expected_image" <<<"$rendered"; then
+            echo "Rendered Python AI image does not match the published digest" >&2
+            exit 1
+          fi
+
+      - name: Create or recover Infra draft pull request
+        if: github.event_name == 'push'
+        working-directory: ${{ github.workspace }}/infra
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+          PYTHON_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INFRA_REPOSITORY: pawbridge/pawbridge-infra-k8s
+          PYTHON_AI_IMAGE_TAG: sha-${{ github.sha }}
+          PYTHON_AI_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          PYTHON_COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          branch="chore/python-ai-image-${GITHUB_SHA:0:12}"
+          title="chore: Python AI 이미지 digest 갱신"
+          values_file="environments/dev/values/python-ai-service.yaml"
+          checked_out_infra_sha="$(git rev-parse HEAD)"
+          infra_owner="${INFRA_REPOSITORY%%/*}"
+
+          check_python_ai_freshness() {
+            local changed_file
+            local changed_file_count
+            local changed_files
+            local comparison_status
+
+            newer_python_path=""
+            latest_python_sha="$(GH_TOKEN="$PYTHON_GITHUB_TOKEN" gh api \
+              "/repos/$GITHUB_REPOSITORY/git/ref/heads/dev" \
+              --jq '.object.sha')" || return 2
+            if [ "$latest_python_sha" = "$GITHUB_SHA" ]; then
+              return 0
+            fi
+
+            comparison_status="$(GH_TOKEN="$PYTHON_GITHUB_TOKEN" gh api \
+              "/repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$latest_python_sha" \
+              --jq '.status')" || return 2
+            if [ "$comparison_status" != "ahead" ]; then
+              echo "Python dev is not a descendant of this workflow commit: $comparison_status" >&2
+              return 2
+            fi
+
+            changed_file_count="$(GH_TOKEN="$PYTHON_GITHUB_TOKEN" gh api \
+              "/repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$latest_python_sha" \
+              --jq '.files | length')" || return 2
+            if [ "$changed_file_count" -ge 300 ]; then
+              echo "Python AI comparison reached the 300-file API safety limit" >&2
+              return 2
+            fi
+
+            changed_files="$(GH_TOKEN="$PYTHON_GITHUB_TOKEN" gh api \
+              "/repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$latest_python_sha" \
+              --jq '.files[] | .filename, (.previous_filename // empty)')" || return 2
+            while IFS= read -r changed_file; do
+              case "$changed_file" in
+                app/*|tests/*|Dockerfile|requirements.txt|.dockerignore|.github/workflows/python-ai-image-ci.yml|.github/scripts/update_python_ai_image_values.py|.github/scripts/test_update_python_ai_image_values.py)
+                  newer_python_path="$changed_file"
+                  return 1
+                  ;;
+              esac
+            done <<<"$changed_files"
+
+            return 0
+          }
+
+          check_infra_base_freshness() {
+            local latest_infra_sha
+
+            latest_infra_sha="$(git ls-remote origin refs/heads/dev | awk '{print $1}')"
+            if [ -z "$latest_infra_sha" ] || [ "$latest_infra_sha" != "$checked_out_infra_sha" ]; then
+              echo "Infra dev changed after checkout; refusing to branch from a stale base" >&2
+              return 1
+            fi
+          }
+
+          freshness_status=0
+          check_python_ai_freshness || freshness_status=$?
+          if [ "$freshness_status" -eq 1 ]; then
+            echo "Skip stale Python AI run: $newer_python_path changed after $GITHUB_SHA"
+            exit 0
+          elif [ "$freshness_status" -ne 0 ]; then
+            echo "Could not determine Python AI run freshness" >&2
+            exit "$freshness_status"
+          fi
+
+          check_infra_base_freshness
+
+          if git diff --quiet -- "$values_file"; then
+            echo "Infra already references $PYTHON_AI_IMAGE_TAG@$PYTHON_AI_IMAGE_DIGEST"
+            exit 0
+          fi
+
+          body_file="$(mktemp)"
+          trap 'rm -f "$body_file"' EXIT
+          cat >"$body_file" <<EOF
+          <!-- pawbridge-automation: python-ai-image -->
+
+          ## Summary
+
+          Python AI 서비스의 dev 이미지 digest를 dev 환경 선언 상태에 고정합니다.
+
+          ## Changes
+
+          - Python AI 이미지 tag: $PYTHON_AI_IMAGE_TAG
+          - Python AI 이미지 digest: $PYTHON_AI_IMAGE_DIGEST
+
+          ## Impact
+
+          - API / Data: 변경 없음
+          - Configuration / Deployment: 이 Draft PR을 머지하면 dev 선언 상태가 새 Python AI 이미지를 가리킵니다. 머지만으로 실제 클러스터에 배포하지는 않습니다.
+
+          ## Verification
+
+          - Python 테스트와 Docker 이미지 빌드가 성공한 뒤 이미지를 발행했습니다.
+          - Docker Hub에서 repository@digest 조회가 성공한 값을 values에 반영했습니다.
+          - Python AI Helm lint와 렌더 결과의 digest 일치를 확인했습니다.
+
+          ## Related
+
+          - Python commit: $PYTHON_COMMIT_URL
+
+          ## Out of Scope
+
+          - PR 자동 Ready 전환과 자동 머지
+          - Argo CD 동기화와 실제 Kubernetes 배포
+
+          ## Checklist
+
+          - [x] 비밀정보가 diff·본문·로그에 포함되지 않았습니다.
+          - [x] API·데이터·설정·배포 영향을 필요한 범위에서 명시했습니다.
+          - [x] 실행한 검증과 미실행 검증을 사실대로 구분했습니다.
+          - [ ] 필요한 문서가 함께 갱신되었습니다. (해당 없음: 이미지 참조 자동 갱신)
+          EOF
+
+          check_infra_base_freshness
+
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin \
+              "refs/heads/$branch:refs/remotes/origin/$branch"
+            changed_paths="$(git diff --name-only "origin/dev...origin/$branch")"
+            recovery_commit_count="$(git rev-list --count "origin/dev..origin/$branch")"
+            recovery_parent_sha="$(git rev-parse "origin/$branch^")"
+            recovery_author_email="$(git show -s --format='%ae' "origin/$branch")"
+            recovery_subject="$(git show -s --format='%s' "origin/$branch")"
+
+            if [ "$changed_paths" != "$values_file" ] || \
+              [ "$recovery_commit_count" -ne 1 ] || \
+              [ "$recovery_parent_sha" != "$checked_out_infra_sha" ] || \
+              [ "$recovery_author_email" != "41898282+github-actions[bot]@users.noreply.github.com" ] || \
+              [ "$recovery_subject" != "$title" ]; then
+              echo "Existing automation branch failed provenance checks: $branch" >&2
+              exit 1
+            fi
+
+            if ! git diff --quiet "origin/$branch" -- "$values_file"; then
+              echo "Existing automation branch has unexpected Python AI image values: $branch" >&2
+              exit 1
+            fi
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$branch"
+            git add -- "$values_file"
+            git commit -m "$title"
+            git push --set-upstream origin "$branch"
+          fi
+
+          automation_head_oid="$(git rev-parse "origin/$branch")"
+          pr_number="$(gh api --method GET \
+            "/repos/$INFRA_REPOSITORY/pulls" \
+            -f state=open \
+            -f base=dev \
+            -f head="$infra_owner:$branch" \
+            --jq '.[0].number // empty')"
+          if [ -z "$pr_number" ]; then
+            pr_url="$(gh pr create \
+              --repo "$INFRA_REPOSITORY" \
+              --base dev \
+              --head "$branch" \
+              --title "$title" \
+              --draft \
+              --body-file "$body_file")"
+            pr_number="${pr_url##*/}"
+          fi
+
+          pr_metadata="$(gh pr view "$pr_number" \
+            --repo "$INFRA_REPOSITORY" \
+            --json url,isDraft,headRefName,headRefOid,headRepositoryOwner,isCrossRepository \
+            --jq '[.url, (.isDraft | tostring), .headRefName, .headRefOid, .headRepositoryOwner.login, (.isCrossRepository | tostring)] | @tsv')"
+          IFS=$'\t' read -r pr_url pr_is_draft pr_head_ref pr_head_oid pr_head_owner pr_is_cross_repository <<<"$pr_metadata"
+          if [ "$pr_head_ref" != "$branch" ] || \
+            [ "$pr_head_oid" != "$automation_head_oid" ] || \
+            [ "$pr_head_owner" != "$infra_owner" ] || \
+            [ "$pr_is_cross_repository" != "false" ]; then
+            echo "Infra pull request head provenance mismatch: $pr_number" >&2
+            exit 1
+          elif [ "$pr_is_draft" != "true" ]; then
+            echo "Existing automation PR is no longer Draft; refusing to change its review state" >&2
+            exit 1
+          fi
+
+          freshness_status=0
+          check_python_ai_freshness || freshness_status=$?
+          if [ "$freshness_status" -eq 1 ]; then
+            gh pr close "$pr_number" --repo "$INFRA_REPOSITORY"
+            echo "Closed stale Infra draft pull request because $newer_python_path changed"
+            exit 0
+          elif [ "$freshness_status" -ne 0 ]; then
+            echo "Could not recheck Python AI run freshness" >&2
+            exit "$freshness_status"
+          fi
+
+          obsolete_prs="$(gh pr list \
+            --repo "$INFRA_REPOSITORY" \
+            --base dev \
+            --state open \
+            --limit 100 \
+            --json number,headRefName,headRefOid,headRepositoryOwner,isCrossRepository,body,isDraft \
+            --jq ".[] | select(.isCrossRepository == false) | select(.headRepositoryOwner.login == \"$infra_owner\") | select(.headRefName | test(\"^chore/python-ai-image-[0-9a-f]{12}$\")) | select((.body // \"\") | contains(\"<!-- pawbridge-automation: python-ai-image -->\")) | [.number, .headRefName, .headRefOid, .isDraft] | @tsv")"
+          while IFS=$'\t' read -r obsolete_number obsolete_branch obsolete_head_oid obsolete_is_draft; do
+            if [ -z "$obsolete_number" ] || [ "$obsolete_branch" = "$branch" ]; then
+              continue
+            fi
+
+            obsolete_sha="${obsolete_branch#chore/python-ai-image-}"
+            comparison_status="$(GH_TOKEN="$PYTHON_GITHUB_TOKEN" gh api \
+              "/repos/$GITHUB_REPOSITORY/compare/$obsolete_sha...$GITHUB_SHA" \
+              --jq '.status')"
+            if [ "$comparison_status" = "ahead" ]; then
+              if [ "$obsolete_is_draft" != "true" ]; then
+                echo "Obsolete automation pull request is not Draft: $obsolete_branch" >&2
+                exit 1
+              fi
+
+              remote_obsolete_oid="$(git ls-remote origin "refs/heads/$obsolete_branch" | awk '{print $1}')"
+              if [ -z "$remote_obsolete_oid" ] || [ "$remote_obsolete_oid" != "$obsolete_head_oid" ]; then
+                echo "Obsolete automation branch head provenance mismatch: $obsolete_branch" >&2
+                exit 1
+              fi
+
+              git fetch origin \
+                "refs/heads/$obsolete_branch:refs/remotes/origin/$obsolete_branch"
+              obsolete_parent_line="$(git rev-list --parents -n 1 "origin/$obsolete_branch")"
+              obsolete_parent_count="$(awk '{print NF - 1}' <<<"$obsolete_parent_line")"
+              obsolete_parent_sha="${obsolete_parent_line#* }"
+              obsolete_changed_paths="$(git diff --name-only "$obsolete_parent_sha" "origin/$obsolete_branch")"
+              obsolete_author_email="$(git show -s --format='%ae' "origin/$obsolete_branch")"
+              obsolete_subject="$(git show -s --format='%s' "origin/$obsolete_branch")"
+              if [ "$obsolete_parent_count" -ne 1 ] || \
+                ! git merge-base --is-ancestor "$obsolete_parent_sha" origin/dev || \
+                [ "$obsolete_changed_paths" != "$values_file" ] || \
+                [ "$obsolete_author_email" != "41898282+github-actions[bot]@users.noreply.github.com" ] || \
+                [ "$obsolete_subject" != "$title" ]; then
+                echo "Obsolete automation branch failed provenance checks: $obsolete_branch" >&2
+                exit 1
+              fi
+
+              gh pr close "$obsolete_number" --repo "$INFRA_REPOSITORY"
+            fi
+          done <<<"$obsolete_prs"
+
+          echo "Infra Draft pull request: $pr_url"
