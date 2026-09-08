@@ -17,7 +17,7 @@ class GeminiChatbotProvider(ChatbotProvider):
 
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
-        self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        self.model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
         self.timeout_seconds = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "15"))
 
     async def generate_answer(self, prompt: str) -> str:
@@ -35,9 +35,6 @@ class GeminiChatbotProvider(ChatbotProvider):
             "generationConfig": {
                 "temperature": 0.4,
                 "maxOutputTokens": 1024,
-                "thinkingConfig": {
-                    "thinkingBudget": 0,
-                },
             },
         }
 
