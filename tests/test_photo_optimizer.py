@@ -90,8 +90,8 @@ class PhotoOptimizerTests(unittest.TestCase):
             optimize_photo(damaged)
 
     def test_mpo_enforces_frame_and_cumulative_pixel_limits(self):
-        original = mpo_bytes(frames=3)
-        for setting, limit in (("MAX_MPO_FRAMES", 2), ("MAX_PIXELS", 24 * 16 * 2)):
+        original = mpo_bytes()
+        for setting, limit in (("MAX_MPO_FRAMES", 1), ("MAX_PIXELS", 24 * 16)):
             with self.subTest(setting=setting), patch("app.photo_optimizer." + setting, limit):
                 with self.assertRaises(PhotoTooLarge):
                     optimize_photo(original)
