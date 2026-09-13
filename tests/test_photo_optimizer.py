@@ -18,6 +18,19 @@ def photo_bytes(mode="RGB", size=(180, 120), format="PNG", **options):
     return output.getvalue()
 
 
+def mpo_bytes(*, orientation=1, frames=2):
+    output = BytesIO()
+    images = [Image.new("RGB", (24, 16), color) for color in ("red", "blue", "green")[:frames]]
+    exif = Image.Exif()
+    exif[274] = orientation
+    try:
+        images[0].save(output, format="MPO", save_all=True, append_images=images[1:], exif=exif)
+        return output.getvalue()
+    finally:
+        for image in images:
+            image.close()
+
+
 class PhotoOptimizerTests(unittest.TestCase):
     def test_smaller_webp_preserves_full_frame_and_dimensions(self):
         source = Image.new("RGB", (180, 120), "green")
@@ -48,6 +61,40 @@ class PhotoOptimizerTests(unittest.TestCase):
                 self.assertEqual(result.content_type, "image/png")
                 self.assertEqual(result.recipe, "original-v1")
                 self.assertEqual(result.source_sha256, result.stored_sha256)
+
+    def test_mpo_preserves_all_original_frames_and_primary_display_orientation(self):
+        for orientation, size in ((1, (24, 16)), (6, (16, 24))):
+            with self.subTest(orientation=orientation):
+                original = mpo_bytes(orientation=orientation)
+                with patch("app.photo_optimizer._encode_webp") as encode:
+                    result = optimize_photo(original)
+                encode.assert_not_called()
+                self.assertEqual(result.data, original)
+                self.assertEqual(result.content_type, "image/jpeg")
+                self.assertEqual(result.recipe, "original-v1")
+                self.assertEqual((result.width, result.height), size)
+                self.assertEqual(result.source_sha256, hashlib.sha256(original).hexdigest())
+                self.assertEqual(result.stored_sha256, result.source_sha256)
+                with Image.open(BytesIO(result.data)) as actual:
+                    self.assertEqual(actual.n_frames, 2)
+                    for frame in range(actual.n_frames):
+                        actual.seek(frame)
+                        actual.load()
+
+    def test_mpo_rejects_damaged_secondary_frame(self):
+        original = mpo_bytes()
+        secondary = original.find(b"\xff\xd8", 2)
+        self.assertGreater(secondary, 0)
+        damaged = original[:secondary] + b"broken secondary frame"
+        with self.assertRaises(InvalidPhoto):
+            optimize_photo(damaged)
+
+    def test_mpo_enforces_frame_and_cumulative_pixel_limits(self):
+        original = mpo_bytes(frames=3)
+        for setting, limit in (("MAX_MPO_FRAMES", 2), ("MAX_PIXELS", 24 * 16 * 2)):
+            with self.subTest(setting=setting), patch("app.photo_optimizer." + setting, limit):
+                with self.assertRaises(PhotoTooLarge):
+                    optimize_photo(original)
 
     def test_jpeg_is_supported(self):
         original = photo_bytes(format="JPEG")

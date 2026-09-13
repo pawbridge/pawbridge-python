@@ -8,6 +8,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 MAX_INPUT_BYTES = 10 * 1024 * 1024
 MAX_PIXELS = 16_000_000
+MAX_MPO_FRAMES = 16
 WEBP_QUALITY = 90
 WEBP_METHOD = 4
 MIME_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
@@ -42,6 +43,37 @@ def _encode_webp(photo: Image.Image) -> bytes:
     return output.getvalue()
 
 
+def _preserve_mpo(source: Image.Image, data: bytes) -> OptimizedPhoto:
+    # MPO may carry auxiliary JPEG frames. Re-encoding only the first would discard them.
+    try:
+        if not 1 <= source.n_frames <= MAX_MPO_FRAMES:
+            raise PhotoTooLarge("MPO exceeds frame limit")
+        width, height = source.size
+        if source.getexif().get(274) in (5, 6, 7, 8):
+            width, height = height, width
+        pixels = 0
+        for frame in range(source.n_frames):
+            source.seek(frame)
+            pixels += source.width * source.height
+            if pixels > MAX_PIXELS:
+                raise PhotoTooLarge("MPO exceeds total pixel limit")
+            source.load()
+    except InvalidPhoto:
+        raise
+    except (ValueError, EOFError) as exc:
+        raise InvalidPhoto("MPO frame could not be decoded") from exc
+    digest = sha256(data).hexdigest()
+    return OptimizedPhoto(
+        data=data,
+        content_type="image/jpeg",
+        source_sha256=digest,
+        stored_sha256=digest,
+        width=width,
+        height=height,
+        recipe="original-v1",
+    )
+
+
 def optimize_photo(data: bytes) -> OptimizedPhoto:
     if len(data) > MAX_INPUT_BYTES:
         raise PhotoTooLarge("Photo exceeds 10 MiB")
@@ -50,8 +82,10 @@ def optimize_photo(data: bytes) -> OptimizedPhoto:
 
     try:
         with Image.open(BytesIO(data)) as source:
+            if source.format == "MPO":
+                return _preserve_mpo(source, data)
             if source.format not in MIME_TYPES:
-                raise InvalidPhoto("Only static JPEG, PNG and WebP are supported")
+                raise InvalidPhoto("Only JPEG, MPO, static PNG and WebP are supported")
             content_type = MIME_TYPES[source.format]
             if source.width * source.height > MAX_PIXELS:
                 raise PhotoTooLarge("Photo exceeds 16 million pixels")
