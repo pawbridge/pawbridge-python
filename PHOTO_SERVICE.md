@@ -53,6 +53,19 @@ image; 503 is missing configuration, capacity exhaustion or processing failure.
 Busy/processing responses include Retry-After. Callers must use bounded retries
 and durable work state, never translate a failed optimization into archive success.
 
-The separate image is not published or deployed by the existing AI image CI.
-CI publication, runtime resource limits, APMS scheduling and R2 persistence need
-their own rollout before this becomes an operational storage flow.
+The dedicated `photo-service-image-ci.yml` tests only photo contracts using
+`requirements-photo.txt`, builds `Dockerfile.photo`, and exercises the running
+image with authentication and a 16MP RGBA fixture under a 512MiB limit. PRs do not
+publish. A dev push (or manual dev run with publish=true) publishes the exact
+verified image as `dorosiya/pawbridge-photo-service:sha-<revision>` and records its
+registry digest. There is no latest tag or automatic Infra change in this workflow.
+
+For the same disposable runtime check locally:
+
+```sh
+python .github/scripts/check_photo_image.py pawbridge-photo:local
+```
+
+The existing AI image CI remains separate. Pin the photo digest in its own
+runtime configuration before rollout; publication does not activate APMS
+archiving, modify the database or write R2 objects.
