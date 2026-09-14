@@ -195,3 +195,25 @@ class GalleryRuntimeTest(unittest.TestCase):
             self.assertEqual(len(calls), 4)
             self.assertEqual(list(source.photo_root.iterdir()), [])
             source.close()
+
+    def test_unchanged_feed_rebuilds_when_published_color_contract_is_stale(self):
+        from app.services.lost_gallery import gallery_mapping
+        with tempfile.TemporaryDirectory() as directory:
+            source = Mock(photo_root=Path(directory), downloaded=0)
+            es = Mock(); es.options.return_value = es
+            refresh = GalleryRefresh(es, SimpleNamespace(model_version="test"), source,
+                                     "animals-lost-dinov3-sam3-runtime-test", directory)
+            refresh.retention = Mock()
+            result = {"index": "old", "records": 1, "snapshot_sha256": "a"*64}
+            refresh.last_result = result; refresh.etag = "unchanged"
+            mapping = gallery_mapping("a"*64); mapping["_meta"].pop("coat_color_version")
+            es.indices.get_alias.return_value = {"old": {}}
+            es.indices.get_mapping.return_value = {"old": {"mappings": mapping}}
+            es.count.return_value = {"count": 1}
+            snapshot = {"manifest_path": "manifest", "etag": "unchanged", "snapshot_sha256": "a"*64}
+            source.fetch.side_effect = [None, snapshot]
+            with patch("app.services.gallery_runtime.build_gallery", return_value=dict(result, index="new")) as build:
+                refresh.cycle()
+            self.assertEqual([call.args[0] for call in source.fetch.call_args_list], ["unchanged", None])
+            build.assert_called_once()
+            self.assertEqual(refresh.last_result["index"], "new")

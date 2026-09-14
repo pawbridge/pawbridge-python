@@ -38,3 +38,24 @@ class FocusStartupTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "gallery mismatch"):
                 asyncio.run(enter())
             self.assertEqual(run.call_count, 2)
+
+    def test_color_ranking_requires_new_gallery_contract_but_disabled_mode_can_start_on_old_gallery(self):
+        from app.services.lost_gallery import gallery_mapping
+        from app.services.sam3_focus import FOCUS_VERSION
+        index = "animals-lost-dinov3-sam3-eval-v1"
+        mapping = gallery_mapping("a"*64)
+        module = types.ModuleType("app.es.client"); module.es = MagicMock()
+        client = module.es.options.return_value
+        client.count.return_value = {"count": 1}
+        with patch.dict(os.environ, {"LOST_SEARCH_VISUAL_PROFILE":"sam3-animal-focus", "LOST_SEARCH_INDEX":index}), patch.dict(sys.modules, {"app.es.client":module}):
+            for enabled in (False, True):
+                for complete in (False, True):
+                    schema = copy.deepcopy(mapping)
+                    if not complete: schema["_meta"].pop("coat_color_version")
+                    client.indices.get_mapping.return_value = {index:{"mappings":schema}}
+                    with self.subTest(enabled=enabled, complete=complete), patch.dict(os.environ, {"LOST_SEARCH_COAT_COLOR_WEIGHT": ".12" if enabled else "0"}):
+                        if enabled and not complete:
+                            with self.assertRaisesRegex(RuntimeError, "completed color gallery"):
+                                validate_focus_gallery(types.SimpleNamespace(model_version=FOCUS_VERSION))
+                        else:
+                            validate_focus_gallery(types.SimpleNamespace(model_version=FOCUS_VERSION))

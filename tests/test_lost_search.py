@@ -163,7 +163,7 @@ class RetrievalContractTest(unittest.TestCase):
         from app.services.lost_search import search_photo
         encoder = types.ModuleType("app.services.dinov3")
         encoder.get_encoder = MagicMock()
-        encoder.get_encoder.return_value.encode_with_metadata.return_value = types.SimpleNamespace(vector=[.1, .2], model_version="test-model", focus_status="original_multiple_animals", animal_vector=None)
+        encoder.get_encoder.return_value.encode_with_metadata.return_value = types.SimpleNamespace(vector=[.1, .2], model_version="test-model", focus_status="original_multiple_animals", animal_vector=None, coat_color=None)
         encoder.gallery_index = lambda: "animals-lost-dinov3-large-v1"
         encoder.MODEL_VERSION = "test-model"
         module = types.ModuleType("app.es.client")
@@ -191,7 +191,7 @@ class RetrievalContractTest(unittest.TestCase):
         encoder = types.ModuleType("app.services.dinov3")
         encoder.get_encoder = MagicMock()
         encoder.get_encoder.return_value.encode_with_metadata.return_value = types.SimpleNamespace(
-            vector=[1., 0.], animal_vector=[0., 1.], model_version="dual-v2", focus_status="animal_mask")
+            vector=[1., 0.], animal_vector=[0., 1.], model_version="dual-v2", focus_status="animal_mask", coat_color=None)
         encoder.gallery_index = lambda: "animals-lost-dinov3-focus-eval-v2"
         module = types.ModuleType("app.es.client")
         module.es = MagicMock()
@@ -213,7 +213,7 @@ class RetrievalContractTest(unittest.TestCase):
         from app.services.lost_search import search_photo
         encoder = types.ModuleType("app.services.dinov3")
         encoder.get_encoder = MagicMock()
-        encoder.get_encoder.return_value.encode_with_metadata.return_value = types.SimpleNamespace(vector=[.1, .2], model_version="test-model", focus_status="original_multiple_animals", animal_vector=None)
+        encoder.get_encoder.return_value.encode_with_metadata.return_value = types.SimpleNamespace(vector=[.1, .2], model_version="test-model", focus_status="original_multiple_animals", animal_vector=None, coat_color=None)
         encoder.gallery_index = lambda: "animals-lost-dinov3-large-v1"
         encoder.MODEL_VERSION = "test-model"
         module = types.ModuleType("app.es.client")
@@ -224,3 +224,20 @@ class RetrievalContractTest(unittest.TestCase):
             with patch.dict(sys.modules,{"app.services.dinov3":encoder,"app.es.client":module}):
                 with self.assertRaises(RuntimeError):
                     search_photo(photo(),"CAT")
+
+    def test_query_and_gallery_color_features_drive_returned_order(self):
+        import sys
+        import types
+        from unittest.mock import MagicMock
+        from app.services.dinov3 import AnimalEmbedding
+        from app.services.lost_search import search_photo
+        from tests.test_coat_color import descriptor
+        dark, tan = descriptor((45, 40, 35)), descriptor((165, 110, 60))
+        encoder = MagicMock()
+        encoder.encode_with_metadata.return_value = AnimalEmbedding([1., 0.], "test", "animal_mask", [1., 0.], dark)
+        module = types.ModuleType("app.es.client"); module.es = MagicMock()
+        module.es.options.return_value.search.return_value = {"hits": {"hits": [hit(1, .88, coat_color=tan), hit(2, .87, coat_color=dark)]}}
+        with patch("app.services.dinov3.get_encoder", return_value=encoder), patch("app.services.dinov3.gallery_index", return_value="test-gallery"), patch.dict(sys.modules, {"app.es.client": module}), patch.dict(os.environ, {"LOST_SEARCH_COAT_COLOR_WEIGHT": ".12"}):
+            result = search_photo(photo(), "DOG")
+        self.assertEqual([c["animalId"] for c in result["candidates"]], [2, 1])
+        self.assertIn("coat_color", module.es.options.return_value.search.call_args.kwargs["source"])
