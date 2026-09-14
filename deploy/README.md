@@ -41,3 +41,33 @@ user unit은 WSL 자체나 Windows를 부팅시키지 않는다. 사용자 로�
 - 자동 갱신만 중지: `LOST_GALLERY_SYNC_ENABLED=false`로 변경하고 승인된 재시작을 실행한다. 마지막 검색 별칭은 그대로 남는다.
 - 완전 중지: `systemctl --user stop pawbridge-lost-search.service`. 상태/사진/인덱스를 삭제하지 않는다.
 - 직전 인덱스로 수동 복구할 경우 먼저 갱신기를 멈추고 일지의 실제 두 인덱스와 모델/문서 수를 확인한 뒤 승인된 별칭 교체를 수행한다. 일지는 비밀 키를 포함하지 않는다.
+
+
+## 운영 VM → WSL GPU 연결
+
+`connect_vm.py`와 `pawbridge-lost-search-tunnel.service`는 현재 WSL의 `shyu` system service 배치를 버전 관리한다. 앞의 범용 user unit과 설치 위치가 다르다. 다른 호스트에서는 unit의 User/Group/Home 경로를 먼저 맞춘다. 기본 VM 주소는 `192.168.57.11`이며 `PAWBRIDGE_VM_ADDRESS`로 사설 IPv4를 지정할 수 있다.
+
+연결은 기존 `~/pawbridge-ai/ssh/vm-key`, `known_hosts`와 VM의 `vagrant` 계정을 사용한다. 키/known_hosts를 덮어쓰거나 host key 검증을 끄지 않는다. VM은 Python 3, 비대화형 `sudo kubectl`, UID 1000, SSH streamlocal forwarding이 필요하다. `GatewayPorts`를 바꾸지 않는다.
+
+- WSL `127.0.0.1:18082` → animal-service:8081: 운영 갤러리 목록 조회.
+- WSL `127.0.0.1:13306` → MySQL:3306: 기존 로컬 미리보기 연결 보존.
+- VM `127.0.0.1:18091` → WSL `127.0.0.1:18090`: 기존 GPU loopback 연결 보존.
+- VM `/home/vagrant/.local/run/pawbridge-gpu/search.sock` → WSL `127.0.0.1:18090`: 운영 Pod 연결. 디렉터리 0700, SSH 소켓 0600, 프록시 UID 1000을 함께 맞춘다.
+
+VM 재접속 시 서비스 IP를 다시 조회한다. 사용 중 소켓, 다른 파일·소유자·심볼릭 링크는 거절한다. 연결 거부를 확인한 동일 소켓만 정리하고 다시 연다. 설정/연결 실패는 30초 후 systemd가 재시도한다. 프로세스 관리자가 하나여야 하며 수동 중복 터널을 띄우지 않는다.
+
+적용 전 기존 연결 스크립트·unit·GPU 환경 파일을 별도 0700 복구 디렉터리에 보관하고 GPU 갤러리 완료 상태를 확인한다. 승인된 배포에서만 새 `connect_vm.py`를 `/home/shyu/pawbridge-ai/bin/connect_vm.py`, unit을 `/etc/systemd/system/pawbridge-lost-search-tunnel.service`에 설치하고 daemon-reload 후 **터널 unit만** 재시작한다. 이 변경은 모델 설치나 GPU 프로세스 재시작을 요구하지 않는다.
+
+GPU 인증키는 운영 animal-service의 `animal-python-internal-auth:INTERNAL_API_KEY`와 같아야 한다. 다른 경우 비노출 절차로 기존 GPU env를 백업하고 해당 필드만 갱신한다. 키 반영을 위한 GPU 재시작은 진행 중인 갤러리가 완료된 후 별도로 승인받아 수행한다. 로컬 미리보기의 기존 키도 확인한다. 실제 값은 명령 인자·로그·Git에 넣지 않는다.
+
+인프라 저장소의 `charts/lost-search-gpu-proxy`를 먼저 배포하고 프록시 health, 내부 인증 실패 401, 인증된 후보 검색을 검증한 다음 animal-service의 `LOST_SEARCH_PYTHON_URL`을 전환한다. 터널 시작만으로 Pod 연결이나 공개 화면 배포를 완료했다고 판단하지 않는다.
+
+복구 시 이전 연결 스크립트/unit으로 되돌리고 터널만 재시작한다. GPU 키를 바꿨다면 해당 env 백업과 미리보기 키도 함께 복원한다. 운영 animal-service URL은 인프라 런북의 순서로 복구한다. R2·ES·갤러리 상태 파일은 삭제하지 않는다.
+
+소켓 복구 및 포워딩 계약 테스트:
+
+```sh
+python3 -m unittest discover -s tests -p test_vm_bridge.py -v
+```
+
+테스트는 임시 Unix 소켓만 사용한다. 소켓 bind를 막는 샌드박스에서는 실행이 차단될 수 있으며, 그 실패를 실제 코드 결함이나 통과로 기록하지 않는다.

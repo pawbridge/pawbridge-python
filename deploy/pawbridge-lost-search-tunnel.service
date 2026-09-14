@@ -1,0 +1,23 @@
+[Unit]
+Description=PawBridge authenticated VM feed and private GPU bridge
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=shyu
+Group=shyu
+WorkingDirectory=/home/shyu/pawbridge-ai/current
+Environment=HOME=/home/shyu
+ExecStart=/usr/bin/python3 /home/shyu/pawbridge-ai/bin/connect_vm.py
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
