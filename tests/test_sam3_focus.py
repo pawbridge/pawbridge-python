@@ -124,3 +124,46 @@ class Sam3ContractTest(unittest.TestCase):
                 encoder.describe_coat_color(None, "DOG", background=True)
             clear.assert_called_once()
         self.assertFalse(encoder.gate.active)
+
+
+class Sam3ThroughputTest(unittest.TestCase):
+    @unittest.skipIf(torch is None, "Requires the dedicated PyTorch runtime")
+    def test_species_text_is_reused_without_reusing_or_mutating_image_state(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from app.services.sam3_focus import Sam3Focus
+        focus = object.__new__(Sam3Focus)
+        focus._species_text = {}
+        def encode(prompts, device):
+            return {"language_features": torch.tensor([1. if prompts == ["dog"] else 2.], requires_grad=True)}
+        backbone = SimpleNamespace(forward_text=Mock(side_effect=encode))
+        focus.model = SimpleNamespace(backbone=backbone, _get_dummy_prompt=lambda: "geometry")
+        def grounding(state):
+            features = state["backbone_out"]
+            value = features["language_features"].item()
+            features["language_features"].add_(100)
+            return (value, features["image_id"], state["geometric_prompt"])
+        focus.processor = SimpleNamespace(device="cpu", _forward_grounding=grounding)
+        for i, species in enumerate(["DOG", "DOG", "CAT", "DOG"]):
+            state = {"backbone_out": {"image_id": i}, "geometric_prompt": "existing"}
+            result = focus._set_species_prompt(state, species)
+            self.assertEqual(result, (1. if species == "DOG" else 2., i, "existing"))
+        self.assertEqual(backbone.forward_text.call_count, 2)
+        self.assertEqual(set(focus._species_text), {"DOG", "CAT"})
+        self.assertFalse(focus._species_text["DOG"]["language_features"].requires_grad)
+
+    @unittest.skipIf(torch is None, "Requires the dedicated PyTorch runtime")
+    def test_failed_text_encoding_is_not_cached_and_next_request_retries(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from app.services.sam3_focus import Sam3Focus
+        focus = object.__new__(Sam3Focus)
+        focus._species_text = {}
+        encode = Mock(side_effect=[RuntimeError("failed text"), {"language_features": torch.ones(1)}])
+        focus.model = SimpleNamespace(backbone=SimpleNamespace(forward_text=encode), _get_dummy_prompt=lambda: "geometry")
+        focus.processor = SimpleNamespace(device="cpu", _forward_grounding=lambda state: state["geometric_prompt"])
+        with self.assertRaisesRegex(RuntimeError, "failed text"):
+            focus._set_species_prompt({"backbone_out": {}}, "DOG")
+        self.assertFalse(focus._species_text)
+        self.assertEqual(focus._set_species_prompt({"backbone_out": {}}, "DOG"), "geometry")
+        self.assertEqual(encode.call_count, 2)

@@ -55,7 +55,7 @@ class LostGalleryTest(unittest.TestCase):
         image_bytes = data.getvalue()
         sha = hashlib.sha256(image_bytes).hexdigest()
         vector = [1.] + [0.] * 1023
-        for failure in [None, 'inference', 'bulk']:
+        for failure in [None, 'inference', 'bulk', 'download']:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 rows = [dict(id=i, species='DOG', source_sha256=sha, color='updated') for i in [1, 2]]
@@ -89,6 +89,8 @@ class LostGalleryTest(unittest.TestCase):
                     requested.append(row['id'])
                     with tempfile.TemporaryDirectory(dir=root) as temporary:
                         path = Path(temporary)/'photo.png'; path.write_bytes(image_bytes); paths.append(path)
+                        if failure == 'download':
+                            raise RuntimeError('download failed')
                         yield path
                 def build():
                     return build_gallery(es, lambda: encoder, manifest, root, alias, root, photo_provider=photo)
@@ -102,7 +104,7 @@ class LostGalleryTest(unittest.TestCase):
                     self.assertEqual(active, [result['index']])
                     self.assertEqual(es.bulk.call_args.kwargs['operations'][1]['color'], 'updated')
                 self.assertEqual(requested, [2])
-                encoder.encode_with_metadata.assert_called_once()
+                self.assertEqual(encoder.encode_with_metadata.call_count, 0 if failure == 'download' else 1)
                 self.assertTrue(paths and all(not path.exists() for path in paths))
 
     def test_color_backfill_reuses_vectors_and_completed_colors_but_never_publishes_failure(self):

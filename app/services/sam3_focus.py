@@ -67,6 +67,24 @@ class Sam3Focus:
         load_mapped_checkpoint(model, checkpoint)
         self.model = model.eval().to("cuda")
         self.processor = Sam3Processor(self.model, confidence_threshold=0.5)
+        self._species_text = {}
+
+    def _set_species_prompt(self, state, species):
+        # Same pinned processor path as set_text_prompt, except for the two fixed
+        # text-only outputs. The encoder gate serializes use of this model.
+        if species not in {"DOG", "CAT"}:
+            raise ValueError("Animal focus requires DOG or CAT")
+        if "backbone_out" not in state:
+            raise ValueError("Image features are required before a species prompt")
+        if species not in self._species_text:
+            outputs = self.model.backbone.forward_text([species.lower()], device=self.processor.device)
+            self._species_text[species] = {key: value.detach().clone() for key, value in outputs.items()}
+        # Grounding receives private tensors/dict so per-image state cannot poison
+        # the next request. Only text features, never photo features, are cached.
+        state["backbone_out"].update({key: value.clone() for key, value in self._species_text[species].items()})
+        if "geometric_prompt" not in state:
+            state["geometric_prompt"] = self.model._get_dummy_prompt()
+        return self.processor._forward_grounding(state)
 
     def prepare(self, image, species):
         import torch
@@ -77,7 +95,7 @@ class Sam3Focus:
             working.thumbnail((1024, 1024), Image.Resampling.BICUBIC)
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
                 state = self.processor.set_image(working)
-                prediction = self.processor.set_text_prompt(state=state, prompt=species.lower())
+                prediction = self._set_species_prompt(state, species)
             boxes = prediction["boxes"].detach().float().cpu().numpy()
             masks = prediction["masks"].detach().cpu().numpy()
             scores = prediction["scores"].detach().float().cpu().numpy()

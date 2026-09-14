@@ -142,6 +142,8 @@ python -m uvicorn app.lost_main:app --host 127.0.0.1 --port 8001 --workers 1
 
 SAM 3 프로필은 BF16 연산을 지원하는 CUDA GPU를 요구하며 PyTorch 할당 한도를 7GiB로 설정한다. 가중치는 FP32를 유지하고 SAM 추론만 BF16 autocast를 사용한다. 메모리 매핑과 `assign=True`로 CPU 중복 가중치 복사를 줄인다. 한도는 GPU 드라이버·다른 앱을 포함한 전체 사용량이나 호스트 RAM 한도가 아니다. 호스트의 메모리 제한·재시작 정책은 별도 서비스 설정이 필요하다.
 
+갤러리 재생성은 다운로드 전용 스레드 하나로 다음에 필요한 사진 한 장을 미리 받는다. GPU 추론은 기존 gate로 직렬화하며 사용자 검색 우선권을 유지한다. 현재 처리 사진과 다음 사진만 임시 파일로 보관하고, 실패·취소 시에도 정리한다. SAM 3는 고정된 `dog`·`cat` 텍스트 특징만 모델 프로세스 안에서 재사용하며 이미지 특징이나 마스크를 사진 사이에 재사용하지 않는다.
+
 DINOv3 및 SAM 3 체크포인트 SHA-256이 코드의 고정값과 다르면 시작하지 않는다. SAM 3 모델 버전은 `dinov3-large-sam39999e234-dual-pad256-v1`이다. 갤러리는 동일한 `DinoV3Encoder.encode_with_metadata` 경로로 생성해야 하며, 다음 계약을 갖춰야 시작한다.
 
 - 매핑 `_meta.model_version`이 해당 프로필의 모델 버전과 일치한다.
