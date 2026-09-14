@@ -31,12 +31,18 @@ async def extract_embedding_from_url(image_url: str) -> list[float] | None:
             response.raise_for_status()
 
         image = Image.open(io.BytesIO(response.content)).convert("RGB")
-        tensor = _transform(image).unsqueeze(0)  # (1, 3, 224, 224)
-
-        with torch.no_grad():
-            vector = _model(tensor)                   # (1, 384) CLS 토큰
-            vector = F.normalize(vector, dim=-1)      # L2 정규화 → 코사인 유사도 일관성 보장
-            return vector.squeeze(0).tolist()         # (384,) → list[float]
+        try:
+            return extract_embedding_from_image(image)
+        finally:
+            image.close()
 
     except Exception:
         return None
+
+
+def extract_embedding_from_image(image: Image.Image) -> list[float]:
+    """Shared encoder; callers own decoding and image lifetime."""
+    tensor = _transform(image).unsqueeze(0)
+    with torch.no_grad():
+        vector = F.normalize(_model(tensor), dim=-1)
+        return vector.squeeze(0).tolist()
