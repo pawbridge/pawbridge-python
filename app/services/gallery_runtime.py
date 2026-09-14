@@ -28,6 +28,9 @@ class BackgroundEncoder:
     def encode_with_metadata(self, image, species):
         return self.encoder.encode_with_metadata(image, species, background=True)
 
+    def describe_coat_color(self, image, species):
+        return self.encoder.describe_coat_color(image, species, background=True)
+
 
 class GalleryRefresh:
     def __init__(self, es, encoder, source, alias, state_dir, interval=900, ready=True):

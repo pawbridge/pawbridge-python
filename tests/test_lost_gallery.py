@@ -81,7 +81,7 @@ class LostGalleryTest(unittest.TestCase):
                 es.indices.update_aliases.side_effect = publish
                 encoder = Mock(model_version=FOCUS_VERSION)
                 encoder.encode_with_metadata.return_value = SimpleNamespace(model_version=FOCUS_VERSION,
-                    vector=vector, animal_vector=None, focus_status='original_no_confident_animal')
+                    vector=vector, animal_vector=None, focus_status='original_no_confident_animal', coat_color=None)
                 if failure == 'inference': encoder.encode_with_metadata.side_effect = RuntimeError('inference failed')
                 requested = []; paths = []
                 @contextmanager
@@ -104,3 +104,63 @@ class LostGalleryTest(unittest.TestCase):
                 self.assertEqual(requested, [2])
                 encoder.encode_with_metadata.assert_called_once()
                 self.assertTrue(paths and all(not path.exists() for path in paths))
+
+    def test_color_backfill_reuses_vectors_and_completed_colors_but_never_publishes_failure(self):
+        from app.services.coat_color import VERSION
+        from tests.test_coat_color import descriptor
+        color = descriptor("black")
+        buffer = io.BytesIO()
+        with Image.new("RGB", (120, 120), "black") as image:
+            image.save(buffer, format="PNG")
+        data = buffer.getvalue(); sha = hashlib.sha256(data).hexdigest()
+        vector = [1.] + [0.] * 1023
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                rows = [dict(id=i, species="DOG", source_sha256=sha) for i in (1, 2)]
+                manifest = root / "manifest.json"
+                manifest.write_text(json.dumps(dict(complete=True, records=rows)))
+                (root / (sha + ".image")).write_bytes(data)
+                old = "animals-lost-dinov3-sam3-build-old"
+                alias = "animals-lost-dinov3-sam3-color-test"
+                active = [old]
+                es = Mock(); es.options.return_value = es
+                es.indices.exists_alias.return_value = True
+                es.indices.exists.return_value = False
+                es.indices.get_alias.side_effect = lambda **_: {active[0]: {}}
+                old_mapping = gallery_mapping("a" * 64)
+                old_mapping["_meta"].pop("coat_color_version")
+                es.indices.get_mapping.return_value = {old: {"mappings": old_mapping}}
+                cached = [dict(row, model_version=FOCUS_VERSION, image_vector=vector,
+                               animal_vector=vector, focus_status="animal_mask") for row in rows]
+                cached[1].update(coat_color_version=VERSION, coat_color=color)
+                es.mget.side_effect = lambda index, ids: {"docs": [dict(found=True, _source=r) for r in cached]} if index == old else {"docs": []}
+                es.bulk.return_value = {"errors": False}; es.count.return_value = {"count": 2}
+                def publish(actions):
+                    active[0] = actions[-1]["add"]["index"]
+                    return {"acknowledged": True}
+                es.indices.update_aliases.side_effect = publish
+                encoder = Mock(model_version=FOCUS_VERSION)
+                encoder.describe_coat_color.return_value = color
+                if failure:
+                    encoder.describe_coat_color.side_effect = RuntimeError("SAM failed")
+                    with self.assertRaisesRegex(RuntimeError, "SAM failed"):
+                        build_gallery(es, lambda: encoder, manifest, root, alias, root)
+                    self.assertEqual(active, [old])
+                    es.indices.update_aliases.assert_not_called()
+                else:
+                    result = build_gallery(es, lambda: encoder, manifest, root, alias, root)
+                    self.assertEqual((result["encoded"], result["reused"], result["color_processed"], result["color_available"]), (0, 2, 1, 2))
+                    for document in es.bulk.call_args.kwargs["operations"][1::2]:
+                        self.assertEqual(document["image_vector"], vector)
+                        self.assertEqual(document["animal_vector"], vector)
+                        self.assertEqual(document["coat_color"], color)
+                        self.assertEqual(document["coat_color_version"], VERSION)
+                encoder.encode_with_metadata.assert_not_called()
+                encoder.describe_coat_color.assert_called_once()
+
+    def test_color_contract_creates_a_new_target_even_for_identical_source_snapshot(self):
+        from app.services.lost_gallery import gallery_target
+        digest = "a" * 64
+        legacy = "animals-lost-dinov3-sam3-build-" + hashlib.sha256((FOCUS_VERSION + digest).encode()).hexdigest()[:24]
+        self.assertNotEqual(gallery_target(digest), legacy)

@@ -28,6 +28,7 @@ class AnimalEmbedding:
     model_version: str
     focus_status: str
     animal_vector: list[float] | None = None
+    coat_color: dict | None = None
 
 
 def gallery_index():
@@ -114,6 +115,23 @@ class DinoV3Encoder:
             torch.cuda.empty_cache()
             raise RuntimeError("GPU memory exhausted during lost-animal search")
 
+    def describe_coat_color(self, image, species, *, background=False):
+        # Reuse the loaded segmenter without recomputing either DINO vector.
+        import torch
+        with self.gate.acquire(background=background):
+            try:
+                if self.focus is None:
+                    raise RuntimeError("Color backfill requires an animal-focus encoder")
+                prepared = self.focus.prepare(image, species)
+                try:
+                    return prepared.coat_color
+                finally:
+                    prepared.image.close()
+            except torch.cuda.OutOfMemoryError:
+                pass
+            torch.cuda.empty_cache()
+            raise RuntimeError("GPU memory exhausted during color backfill")
+
     def _encode_image(self, image, species):
         if self.focus is None:
             return AnimalEmbedding(self._vector_for(image), self.model_version, "original_profile")
@@ -125,7 +143,7 @@ class DinoV3Encoder:
         prepared = self.focus.prepare(image, species)
         try:
             animal_vector = self._vector_for(prepared.image) if prepared.status == "animal_mask" else None
-            return AnimalEmbedding(full_vector, self.model_version, prepared.status, animal_vector)
+            return AnimalEmbedding(full_vector, self.model_version, prepared.status, animal_vector, prepared.coat_color)
         finally:
             prepared.image.close()
 

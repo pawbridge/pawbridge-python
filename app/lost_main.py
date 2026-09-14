@@ -22,6 +22,9 @@ def validate_focus_gallery(encoder):
                    or properties[field].get("dims") != DIMENSIONS
                    for field in ("image_vector", "animal_vector"))):
         raise RuntimeError("Animal focus gallery mapping/version mismatch")
+    from app.services.coat_color import VERSION as COLOR_VERSION, ranking_weight
+    if ranking_weight() and mapping.get("_meta", {}).get("coat_color_version") != COLOR_VERSION:
+        raise RuntimeError("Coat-color ranking requires a completed color gallery")
     count = client.count(index=index, query={"bool": {"filter": [
         {"term": {"model_version": encoder.model_version}},
         {"exists": {"field": "image_vector"}}, {"exists": {"field": "id"}}]}})["count"]
@@ -34,6 +37,9 @@ async def lifespan(app):
     if not os.getenv("INTERNAL_API_KEY"):
         raise RuntimeError("Internal authentication must be configured")
     gallery_index()
+    from app.services.coat_color import ranking_weight
+    if ranking_weight() and visual_profile() != "sam3-animal-focus":
+        raise RuntimeError("Coat-color ranking requires the SAM 3 gallery")
     enabled = os.getenv("LOST_GALLERY_SYNC_ENABLED", "false").lower() == "true"
     state_dir = os.getenv("LOST_GALLERY_STATE_DIR")
     if enabled and (visual_profile() != "sam3-animal-focus" or not state_dir):

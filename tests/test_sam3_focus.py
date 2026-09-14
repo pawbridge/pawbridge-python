@@ -42,6 +42,8 @@ class Sam3ContractTest(unittest.TestCase):
             result = prepare_prediction(image, [[10, 10, 110, 110]], mask, [.9])
             try:
                 self.assertEqual(result.status, "animal_mask")
+                from app.services.coat_color import valid
+                self.assertTrue(valid(result.coat_color))
                 self.assertEqual(result.image.size, (256, 256))
                 self.assertEqual(result.image.getpixel((0, 0)), (124, 116, 104))
                 self.assertEqual(image.tobytes(), original)
@@ -98,3 +100,27 @@ class Sam3ContractTest(unittest.TestCase):
             self.assertFalse(encoder.gate.active)
             clear.assert_called_once_with()
             self.assertEqual(encoder.encode_with_metadata(None, "DOG"), "ok")
+
+    @unittest.skipIf(torch is None, "Requires the dedicated PyTorch runtime")
+    def test_color_only_backfill_shares_gate_and_does_not_encode_dino_vectors(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from app.services.animal_focus import FocusResult
+        from app.services.inference_gate import InferenceGate
+        encoder = object.__new__(DinoV3Encoder)
+        encoder.gate = InferenceGate()
+        encoder._vector_for = Mock()
+        color = {"test": "descriptor"}
+        def prepare(image, species):
+            self.assertTrue(encoder.gate.active)
+            return FocusResult(Image.new("RGB", (32, 32)), "animal_mask", color)
+        encoder.focus = SimpleNamespace(prepare=prepare)
+        self.assertEqual(encoder.describe_coat_color(None, "DOG", background=True), color)
+        encoder._vector_for.assert_not_called()
+        self.assertFalse(encoder.gate.active)
+        encoder.focus.prepare = Mock(side_effect=torch.cuda.OutOfMemoryError())
+        with patch("torch.cuda.empty_cache") as clear:
+            with self.assertRaisesRegex(RuntimeError, "color backfill"):
+                encoder.describe_coat_color(None, "DOG", background=True)
+            clear.assert_called_once()
+        self.assertFalse(encoder.gate.active)

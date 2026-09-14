@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 from app.services.dinov3 import DIMENSIONS, validate_vector
 from app.services.sam3_focus import FOCUS_VERSION
+from app.services.coat_color import VERSION as COLOR_VERSION, valid as valid_color
 
 CONTRACT = "pawbridge-lost-gallery-v1"
 PREFIX = "animals-lost-dinov3-sam3-"
@@ -53,19 +54,26 @@ def reusable_document(document, row):
         return False
 
 
+def reusable_color(document):
+    return (document.get("coat_color_version") == COLOR_VERSION
+            and (document.get("coat_color") is None or valid_color(document["coat_color"])))
+
+
 def gallery_mapping(snapshot_hash):
     properties = {"id": {"type": "long"}, "species": {"type": "keyword"},
                   "source_sha256": {"type": "keyword"}, "model_version": {"type": "keyword"},
                   "focus_status": {"type": "keyword"},
+                  "coat_color_version": {"type": "keyword"},
+                  "coat_color": {"type": "object", "enabled": False},
                   "image_vector": {"type": "dense_vector", "dims": DIMENSIONS, "index": False},
                   "animal_vector": {"type": "dense_vector", "dims": DIMENSIONS, "index": False}}
     properties.update({key: {"type": "keyword", "index": False} for key in METADATA})
     return {"dynamic": "strict", "_meta": {"contract": CONTRACT, "model_version": FOCUS_VERSION,
-                                             "snapshot_sha256": snapshot_hash}, "properties": properties}
+                                             "snapshot_sha256": snapshot_hash, "coat_color_version": COLOR_VERSION}, "properties": properties}
 
 
 def gallery_target(snapshot_hash):
-    return PREFIX + "build-" + hashlib.sha256((FOCUS_VERSION + snapshot_hash).encode()).hexdigest()[:24]
+    return PREFIX + "build-" + hashlib.sha256((FOCUS_VERSION + COLOR_VERSION + snapshot_hash).encode()).hexdigest()[:24]
 
 
 class GalleryBuildCancelled(RuntimeError):
@@ -119,7 +127,7 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
     if old_index == target and client.count(index=target)["count"] == len(records):
         return {"alias": alias, "index": target, "records": len(records), "encoded": 0,
                 "reused": len(records), "snapshot_sha256": snapshot_hash}
-    encoded = reused = 0
+    encoded = reused = color_processed = color_available = 0
     for offset in range(0, len(records), 100):
         batch = records[offset:offset+100]
         ids = [str(row["id"]) for row in batch]
@@ -135,10 +143,16 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         for row in batch:
             check_cancelled()
             cached = cache.get(row["id"], {})
-            if reusable_document(cached, row):
+            reuse_vector = reusable_document(cached, row)
+            color = None
+            if reuse_vector:
                 vector, animal, status = cached["image_vector"], cached.get("animal_vector"), cached["focus_status"]
                 reused += 1
-            else:
+                if reusable_color(cached):
+                    color = cached.get("coat_color")
+            # A previously rejected mask has no usable foreground to backfill.
+            needs_color = reuse_vector and status == "animal_mask" and not reusable_color(cached)
+            if not reuse_vector or needs_color:
                 context = (photo_provider(row) if photo_provider is not None else
                            nullcontext(root / (row["source_sha256"] + ".image")))
                 with context as supplied_path:
@@ -161,16 +175,26 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
                                 or (getattr(source, "n_frames", 1) != 1 and source.format != "MPO")):
                             raise ValueError("Gallery photo must have a bounded primary still image")
                         with ImageOps.exif_transpose(source).convert("RGB") as image:
-                            embedding = encoder.encode_with_metadata(image, row["species"])
-                if embedding.model_version != FOCUS_VERSION:
-                    raise RuntimeError("Encoder changed model during the build")
-                vector, animal, status = embedding.vector, embedding.animal_vector, embedding.focus_status
-                validate_vector(vector)
-                if animal is not None:
-                    validate_vector(animal)
-                encoded += 1
+                            if reuse_vector:
+                                color = encoder.describe_coat_color(image, row["species"])
+                            else:
+                                embedding = encoder.encode_with_metadata(image, row["species"])
+                                if embedding.model_version != FOCUS_VERSION:
+                                    raise RuntimeError("Encoder changed model during the build")
+                                vector, animal, status = embedding.vector, embedding.animal_vector, embedding.focus_status
+                                color = embedding.coat_color
+                                validate_vector(vector)
+                                if animal is not None:
+                                    validate_vector(animal)
+                                encoded += 1
+                color_processed += 1
+            if color is not None:
+                if not valid_color(color):
+                    raise RuntimeError("Invalid foreground color descriptor")
+                color_available += 1
             document = {"id": row["id"], "species": row["species"], "source_sha256": row["source_sha256"],
                         "model_version": FOCUS_VERSION, "focus_status": status, "image_vector": vector,
+                        "coat_color_version": COLOR_VERSION, "coat_color": color,
                         **{field: row.get(field) for field in METADATA}}
             if animal is not None:
                 document["animal_vector"] = animal
@@ -180,7 +204,8 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         if response.get("errors"):
             raise RuntimeError("Gallery bulk write failed; previous alias was preserved")
         if progress:
-            progress({"processed": offset + len(batch), "total": len(records), "encoded": encoded, "reused": reused})
+            progress({"processed": offset + len(batch), "total": len(records), "encoded": encoded, "reused": reused,
+                      "color_processed": color_processed, "color_available": color_available})
     client.indices.refresh(index=target)
     count = client.count(index=target)["count"]
     if count != len(records):
@@ -199,4 +224,5 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
     if set(client.indices.get_alias(name=alias)) != {target}:
         raise RuntimeError("Published gallery alias does not match the completed index")
     return {"alias": alias, "index": target, "records": count, "encoded": encoded,
-            "reused": reused, "snapshot_sha256": snapshot_hash}
+            "reused": reused, "color_processed": color_processed, "color_available": color_available,
+            "snapshot_sha256": snapshot_hash}

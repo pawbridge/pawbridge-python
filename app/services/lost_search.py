@@ -6,6 +6,7 @@ import re
 import warnings
 from datetime import date
 from PIL import Image, ImageOps, UnidentifiedImageError
+from app.services.coat_color import mismatch, ranking_weight
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_PIXELS = 16_000_000
@@ -69,18 +70,21 @@ def auxiliary_evidence(source, lost_date=None, region=None, description=None):
     return evidence
 
 
-def rank_candidates(hits, lost_date=None, region=None, description=None):
+def rank_candidates(hits, lost_date=None, region=None, description=None, *, coat_color=None, color_weight=0.):
     candidates = []
+    penalties = {}
     for hit in hits:
         src = hit["_source"]
         score = float(hit["_score"])
         if not math.isfinite(score):
             continue
+        distance = mismatch(coat_color, src.get("coat_color")) if color_weight else None
+        penalties[src["id"]] = color_weight * distance if distance is not None else 0.
         evidence = auxiliary_evidence(src, lost_date, region, description)
         candidates.append({"animalId": src["id"], "imageScore": score - 1.0,
                            "matchedEvidence": evidence})
     # Provisional bounded boost: <= .03, so metadata cannot overturn large visual gaps.
-    candidates.sort(key=lambda c: (-(c["imageScore"] + AUXILIARY_BOOST * len(c["matchedEvidence"])),
+    candidates.sort(key=lambda c: (-(c["imageScore"] + AUXILIARY_BOOST * len(c["matchedEvidence"]) - penalties[c["animalId"]]),
                                    -c["imageScore"], c["animalId"]))
     return candidates[:MAX_RESULTS]
 
@@ -88,6 +92,7 @@ def rank_candidates(hits, lost_date=None, region=None, description=None):
 def search_photo(data, species, lost_date=None, region=None, description=None):
     from app.services.dinov3 import get_encoder, gallery_index
     from app.es.client import es
+    color_weight = ranking_weight()
     with decode_photo(data) as image:
         embedding = get_encoder().encode_with_metadata(image, species)
     logging.getLogger(__name__).info("Lost-search image processing: %s", embedding.focus_status)
@@ -111,7 +116,8 @@ def search_photo(data, species, lost_date=None, region=None, description=None):
                 {"exists": {"field": "id"}}]}},
             "script": script}},
         sort=[{"_score": "desc"}, {"id": "asc"}],
-        source=["id", "happen_date", "happen_place", "color", "special_mark", "description"])
+        source=["id", "happen_date", "happen_place", "color", "special_mark", "description", "coat_color"])
     if response.get("timed_out") or response.get("_shards", {}).get("failed", 0):
         raise RuntimeError("Incomplete search response")
-    return {"candidates": rank_candidates(response["hits"]["hits"], lost_date, region, description)}
+    return {"candidates": rank_candidates(response["hits"]["hits"], lost_date, region, description,
+                                          coat_color=embedding.coat_color, color_weight=color_weight)}

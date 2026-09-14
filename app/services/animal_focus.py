@@ -20,6 +20,7 @@ BACKGROUND = (124, 116, 104)
 class FocusResult:
     image: Image.Image
     status: str
+    coat_color: dict | None = None
 
 
 def square_image(image):
@@ -100,6 +101,10 @@ def prepare_focus(image, box, mask):
             or (xs.max()-xs.min()+1)/region.shape[1] < .75
             or (ys.max()-ys.min()+1)/region.shape[0] < .75):
         return FocusResult(square_image(image), "original_suspect_mask")
+    from app.services.coat_color import describe
+    color_mask = np.zeros_like(foreground)
+    color_mask[bounds[1]:bounds[3], bounds[0]:bounds[2]] = probabilities[bounds[1]:bounds[3], bounds[0]:bounds[2]] >= .9
+    color = describe(image, color_mask)
     # Only use the selected instance, with a small context margin around its box.
     dx, dy = (x2-x1)*.1, (y2-y1)*.1
     crop = (max(0, math.floor(x1-dx)), max(0, math.floor(y1-dy)),
@@ -108,7 +113,7 @@ def prepare_focus(image, box, mask):
         with Image.new("RGB", image.size, BACKGROUND) as background:
             with Image.composite(image, background, alpha) as masked:
                 with masked.crop(crop) as view:
-                    return FocusResult(square_image(view), "animal_mask")
+                    return FocusResult(square_image(view), "animal_mask", color)
 
 
 class AnimalFocus:
