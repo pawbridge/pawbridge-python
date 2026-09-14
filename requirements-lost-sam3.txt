@@ -1,0 +1,10 @@
+# Optional SAM 3 GPU runtime: Python 3.12, separate from the CPU AI image.
+-r requirements-lost-gpu.txt
+sam3 @ git+https://github.com/facebookresearch/sam3.git@660a5e9e1b8b4c02c0ad97229b88a09a6e4ff5b7
+setuptools==80.10.2
+einops==0.8.2
+scipy==1.17.1
+pycocotools==2.0.11
+ftfy==6.1.1
+regex==2026.9.10
+iopath==0.1.10
