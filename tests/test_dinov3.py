@@ -46,8 +46,6 @@ class DualEmbeddingTest(unittest.TestCase):
         for status in ["animal_mask", "original_multiple_animals", "original_suspect_mask"]:
             with self.subTest(status=status), Image.new("RGB", (40, 80), "red") as image:
                 encoder = object.__new__(DinoV3Encoder)
-                from app.services.inference_gate import InferenceGate
-                encoder.gate = InferenceGate()
                 encoder.model_version = FOCUS_VERSION
                 encoder.focus = SimpleNamespace(prepare=lambda *_: FocusResult(Image.new("RGB", (256,256), "blue"), status))
                 calls = []
@@ -55,7 +53,8 @@ class DualEmbeddingTest(unittest.TestCase):
                     calls.append(view.tobytes())
                     return [1.,0.] if len(calls) == 1 else [0.,1.]
                 encoder._vector_for = vector_for
-                result = encoder.encode_with_metadata(image, "DOG")
+                # This contract is image composition; GPU admission/OOM has its own runtime test.
+                result = encoder._encode_image(image, "DOG")
                 full_views.append(calls[0])
                 self.assertEqual(result.vector, [1.,0.])
                 self.assertEqual(result.animal_vector, [0.,1.] if status == "animal_mask" else None)

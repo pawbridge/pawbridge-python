@@ -6,7 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-import torch
+# CPU image CI intentionally omits PyTorch. These two runtime contracts are
+# exercised without skips in the dedicated CUDA environment.
+try:
+    import torch
+except ModuleNotFoundError as error:
+    if error.name != 'torch':
+        raise
+    torch = None
 from PIL import Image
 from app.services.sam3_focus import prepare_prediction, load_mapped_checkpoint
 from app.services.dinov3 import DinoV3Encoder, gallery_index
@@ -62,6 +69,7 @@ class Sam3ContractTest(unittest.TestCase):
                 with self.subTest(scores=scores), self.assertRaises(RuntimeError):
                     prepare_prediction(image, boxes, masks, scores)
 
+    @unittest.skipIf(torch is None, "Requires the dedicated PyTorch runtime")
     def test_mapped_loader_requires_all_active_keys_and_rejects_unknown_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "weights.pt"
@@ -79,6 +87,7 @@ class Sam3ContractTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     load_mapped_checkpoint(model, path)
 
+    @unittest.skipIf(torch is None, "Requires the dedicated PyTorch runtime")
     def test_gpu_oom_releases_lock_and_next_request_can_run(self):
         encoder = object.__new__(DinoV3Encoder)
         from app.services.inference_gate import InferenceGate
