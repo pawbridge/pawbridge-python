@@ -185,3 +185,7 @@ python -m app.gallery_main --manifest /path/to/snapshot.json \
 ### 갤러리 자동 갱신과 재시작
 
 SAM3 실종 후보 검색의 내부 스냅샷 공급, 단일 GPU 공유, 원자적 갤러리 교체와 재시작 설정은 [실행 런북](deploy/README.md)을 따른다. 기능은 기본 비활성화이며 실제 feed 배포 및 연결 확인 후 켠다.
+
+### Bounded gallery feed
+
+Set `LOST_GALLERY_PROTOCOL=v2` only after the animal-service snapshot/page API is deployed. `LOST_GALLERY_SOURCE_URL` remains the legacy base URL; the client appends `/snapshots`. The consumer requests at most 100 records and 2MiB per page, persists only the acknowledged cursor/hash state, and never falls back to the full v1 feed. Failed or expired snapshots preserve the published search alias. Photo prefetch remains current plus one next photo. A completed snapshot is released from the server; URLs never enter the checkpoint file.

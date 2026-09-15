@@ -81,17 +81,17 @@ class GalleryBuildCancelled(RuntimeError):
     pass
 
 
-def build_gallery(es, encoder_factory, manifest_path, photo_root, alias, state_dir, progress=None, cancelled=None, photo_provider=None):
+def build_gallery(es, encoder_factory, manifest_path, photo_root, alias, state_dir, progress=None, cancelled=None, photo_provider=None, stream=None):
     # One GPU host is supported. All publishers share this state directory.
     import fcntl
     state = Path(state_dir)
     state.mkdir(parents=True, exist_ok=True)
     with (state / "gallery-publisher.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _build_gallery(es, encoder_factory(), manifest_path, photo_root, alias, progress, cancelled, photo_provider)
+        return _build_gallery(es, encoder_factory(), manifest_path, photo_root, alias, progress, cancelled, photo_provider, stream)
 
 
-def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None, cancelled=None, photo_provider=None):
+def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None, cancelled=None, photo_provider=None, stream=None):
     def check_cancelled():
         if cancelled and cancelled():
             raise GalleryBuildCancelled("Gallery build stopped before publication")
@@ -99,7 +99,13 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
     if (not re.fullmatch(PREFIX + r"[a-z0-9][a-z0-9-]{0,60}", alias)
             or "-build-" in alias or encoder.model_version != FOCUS_VERSION):
         raise ValueError("SAM 3 gallery alias/model is required")
-    records, snapshot_hash = read_manifest(manifest_path)
+    if stream is None:
+        records, snapshot_hash = read_manifest(manifest_path)
+        total = len(records)
+    else:
+        records = None
+        total = stream.total
+        snapshot_hash = stream.checkpoint['descriptor']['snapshotSha256']
     root = Path(photo_root).resolve(strict=True)
     target = gallery_target(snapshot_hash)
     client = es.options(request_timeout=30, max_retries=0)
@@ -125,12 +131,20 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         client.indices.create(index=target, settings={"number_of_shards": 1, "number_of_replicas": 0},
                               mappings=gallery_mapping(snapshot_hash))
     check_cancelled()
-    if old_index == target and client.count(index=target)["count"] == len(records):
-        return {"alias": alias, "index": target, "records": len(records), "encoded": 0,
-                "reused": len(records), "snapshot_sha256": snapshot_hash}
-    encoded = reused = color_processed = color_available = 0
-    for offset in range(0, len(records), 100):
-        batch = records[offset:offset+100]
+    if old_index == target and client.count(index=target)["count"] == total:
+        return {"alias": alias, "index": target, "records": total, "encoded": 0,
+                "reused": total, "snapshot_sha256": snapshot_hash}
+    if stream is not None and stream.processed and client.count(index=target)["count"] < stream.processed:
+        # The staging index may have been removed after a prior process stopped.
+        stream.reset_resume()
+    processed = stream.processed if stream is not None else 0
+    reused = processed
+    encoded = color_processed = color_available = 0
+    batches = (stream.pages(cancelled or (lambda: False)) if stream is not None else
+               (records[offset:offset+100] for offset in range(0, total, 100)))
+    for batch in batches:
+        if not 1 <= len(batch) <= 100 or processed + len(batch) > total:
+            raise ValueError("Gallery batch exceeds its declared bounds")
         ids = [str(row["id"]) for row in batch]
         cache = {}
         for source in dict.fromkeys(x for x in (old_index, target) if x):
@@ -213,12 +227,20 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         response = client.bulk(operations=operations)
         if response.get("errors"):
             raise RuntimeError("Gallery bulk write failed; previous alias was preserved")
+        processed += len(batch)
+        if stream is not None:
+            # Persist the cursor only after the complete page bulk was acknowledged.
+            stream.acknowledge(processed)
         if progress:
-            progress({"processed": offset + len(batch), "total": len(records), "encoded": encoded, "reused": reused,
+            progress({"processed": processed, "total": total, "encoded": encoded, "reused": reused,
                       "color_processed": color_processed, "color_available": color_available})
+    if processed != total:
+        raise RuntimeError("Gallery stream ended before the declared count")
+    if stream is not None:
+        stream.verify_complete()
     client.indices.refresh(index=target)
     count = client.count(index=target)["count"]
-    if count != len(records):
+    if count != total:
         raise RuntimeError("Staging gallery count differs from the complete snapshot")
     # Detect a concurrent publisher before constructing the atomic alias update.
     current = list(client.indices.get_alias(name=alias)) if client.indices.exists_alias(name=alias) else []

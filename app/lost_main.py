@@ -46,6 +46,11 @@ async def lifespan(app):
         raise RuntimeError("Automatic gallery refresh requires SAM 3 and a persistent state directory")
     from app.services.gallery_runtime import runtime_owner, GalleryRefresh
     from app.services.gallery_source import GallerySource
+    from app.services.gallery_pages import PagedGallerySource
+    protocol = os.getenv('LOST_GALLERY_PROTOCOL', 'v1')
+    if protocol not in {'v1', 'v2'}:
+        raise RuntimeError('Gallery protocol must be v1 or v2')
+    source_class = PagedGallerySource if protocol == 'v2' else GallerySource
     # Acquire ownership before loading weights; CLI and API must use the same state directory.
     with runtime_owner(state_dir) if state_dir else nullcontext():
         encoder = await anyio.to_thread.run_sync(get_encoder)
@@ -61,7 +66,7 @@ async def lifespan(app):
         refresh = None
         if enabled:
             from app.es.client import es
-            source = GallerySource(os.environ["LOST_GALLERY_SOURCE_URL"],
+            source = source_class(os.environ["LOST_GALLERY_SOURCE_URL"],
                                    os.environ["LOST_GALLERY_SOURCE_KEY"],
                                    os.environ["LOST_GALLERY_R2_HOST"], state_dir,
                                    os.environ["LOST_GALLERY_PHOTO_ROOT"])

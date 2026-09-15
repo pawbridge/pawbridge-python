@@ -80,11 +80,14 @@ class GalleryRefresh:
             raise ValueError('Source did not provide a complete snapshot')
         self.retention.prepare(snapshot['snapshot_sha256'])
         self.save_status(state='building')
-        result = build_gallery(self.es, lambda: self.encoder, snapshot['manifest_path'],
+        arguments = {}
+        if snapshot.get('paged') is True:
+            arguments['stream'] = snapshot['stream']
+        result = build_gallery(self.es, lambda: self.encoder, snapshot.get('manifest_path'),
                                self.source.photo_root, self.alias, self.state_dir,
                                progress=lambda row: self.save_status(state='building', progress=row),
                                cancelled=self.stop.is_set,
-                               photo_provider=lambda row: self.source.photo(row, self.stop.is_set))
+                               photo_provider=lambda row: self.source.photo(row, self.stop.is_set), **arguments)
         self.retention.published(result['index'])
         self.last_result = result
         self.ready = True
@@ -92,6 +95,9 @@ class GalleryRefresh:
         self.save_status(state='idle', lastSuccess=datetime.now(timezone.utc).isoformat(),
                          result=result, photos={'downloaded': self.source.downloaded, 'retained': 0}, progress=None)
         self.etag = snapshot['etag']
+        if snapshot.get('paged') is True:
+            # Publication has already succeeded; a cleanup failure is retried before another snapshot.
+            self.source.finish(self.stop.is_set)
 
     def run(self):
         failures = 0
