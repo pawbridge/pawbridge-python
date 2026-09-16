@@ -14,10 +14,11 @@ from app.services.sam3_focus import FOCUS_VERSION
 
 class LostGalleryTest(unittest.TestCase):
     def test_incomplete_empty_duplicate_or_invalid_snapshot_is_rejected(self):
-        row = {"id": 1, "species": "DOG", "source_sha256": "a" * 64}
+        row = {"id": 1, "species": "DOG", "source_sha256": "a" * 64, "status": "PROTECT"}
         invalid = [{"complete": False, "records": [row]}, {"complete": True, "records": []},
                    {"complete": True, "records": [row, row]},
                    {"complete": True, "records": [dict(row, species="ETC")]},
+                   {"complete": True, "records": [dict(row, status="INVALID")]},
                    {"complete": True, "records": [dict(row, source_sha256="../bad")]}]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "manifest.json"
@@ -28,7 +29,7 @@ class LostGalleryTest(unittest.TestCase):
                         read_manifest(path)
 
     def test_snapshot_hash_is_order_independent_but_includes_metadata_changes(self):
-        rows = [{"id": i, "species": "DOG", "source_sha256": "a" * 64} for i in [1, 2]]
+        rows = [{"id": i, "species": "DOG", "source_sha256": "a" * 64, "status": "PROTECT"} for i in [1, 2]]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "manifest.json"
             hashes = []
@@ -39,7 +40,7 @@ class LostGalleryTest(unittest.TestCase):
             self.assertNotEqual(hashes[0], hashes[2])
 
     def test_only_same_model_species_and_photo_can_reuse_a_valid_vector(self):
-        row = {"id": 1, "species": "DOG", "source_sha256": "a" * 64}
+        row = {"id": 1, "species": "DOG", "source_sha256": "a" * 64, "status": "PROTECT"}
         cached = dict(row, model_version=FOCUS_VERSION, image_vector=[1.] + [0.] * 1023,
                       focus_status="original_no_confident_animal")
         self.assertTrue(reusable_document(cached, dict(row, color="updated metadata")))
@@ -58,7 +59,7 @@ class LostGalleryTest(unittest.TestCase):
         for failure in [None, 'inference', 'bulk', 'download']:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                rows = [dict(id=i, species='DOG', source_sha256=sha, color='updated') for i in [1, 2]]
+                rows = [dict(id=i, species='DOG', source_sha256=sha, status='PROTECT', color='updated') for i in [1, 2]]
                 manifest = root / 'manifest.json'
                 manifest.write_text(json.dumps(dict(complete=True, records=rows)))
                 old = 'animals-lost-dinov3-sam3-build-old'
@@ -119,7 +120,7 @@ class LostGalleryTest(unittest.TestCase):
         for failure in (False, True):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                rows = [dict(id=i, species="DOG", source_sha256=sha) for i in (1, 2)]
+                rows = [dict(id=i, species="DOG", source_sha256=sha, status="PROTECT") for i in (1, 2)]
                 manifest = root / "manifest.json"
                 manifest.write_text(json.dumps(dict(complete=True, records=rows)))
                 (root / (sha + ".image")).write_bytes(data)
@@ -166,3 +167,14 @@ class LostGalleryTest(unittest.TestCase):
         digest = "a" * 64
         legacy = "animals-lost-dinov3-sam3-build-" + hashlib.sha256((FOCUS_VERSION + digest).encode()).hexdigest()[:24]
         self.assertNotEqual(gallery_target(digest), legacy)
+
+    def test_status_is_indexed_and_metadata_contract_changes_the_target(self):
+        from app.services.coat_color import VERSION as COLOR_VERSION
+        from app.services.lost_gallery import METADATA_VERSION, gallery_target
+        digest = "b" * 64
+        mapping = gallery_mapping(digest)
+        self.assertEqual(mapping["properties"]["status"], {"type": "keyword"})
+        self.assertEqual(mapping["_meta"]["metadata_version"], METADATA_VERSION)
+        previous = "animals-lost-dinov3-sam3-build-" + hashlib.sha256(
+            (FOCUS_VERSION + COLOR_VERSION + digest).encode()).hexdigest()[:24]
+        self.assertNotEqual(gallery_target(digest), previous)

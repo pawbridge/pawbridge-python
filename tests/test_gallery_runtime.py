@@ -23,7 +23,7 @@ def sample():
         image.save(data, format='PNG')
     data = data.getvalue()
     sha = hashlib.sha256(data).hexdigest()
-    record = {'id': 1, 'species': 'DOG', 'source_sha256': sha}
+    record = {'id': 1, 'species': 'DOG', 'source_sha256': sha, 'status': 'PROTECT'}
     photo = {'sha256': sha, 'bytes': len(data), 'mime': 'image/png',
              'url': f'https://{HOST}/pawbridge-animal-originals/apms/photos/{sha}.png?X-Amz-Signature=test'}
     return data, {'complete': True, 'count': 1, 'records': [record], 'photos': [photo]}

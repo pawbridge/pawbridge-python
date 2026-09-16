@@ -19,7 +19,7 @@ STOPPED = lambda: False
 
 def item(identifier):
     sha = hashlib.sha256(str(identifier).encode()).hexdigest()
-    return {'record': {'id': identifier, 'species': 'DOG', 'source_sha256': sha, 'description': '갈색 강아지'},
+    return {'record': {'id': identifier, 'species': 'DOG', 'source_sha256': sha, 'status': 'PROTECT', 'description': '갈색 강아지'},
             'photo': {'sha256': sha, 'key': 'apms/photos/' + sha + '.jpg', 'bytes': 123,
                       'mime': 'image/jpeg', 'url': 'https://' + HOST + '/pawbridge-animal-originals/apms/photos/' + sha + '.jpg?signature=private'}}
 
@@ -66,10 +66,10 @@ class Feed:
 
 class GalleryPagesTest(unittest.TestCase):
     def test_fingerprint_matches_java_protocol_fixture_including_unicode_and_nulls(self):
-        row = dict(id=7, species='DOG', source_sha256='a'*64, happen_date='2026-09-15',
+        row = dict(id=7, species='DOG', source_sha256='a'*64, status='PROTECT', happen_date='2026-09-15',
                    happen_place='서울', color='갈색', special_mark=None, description='')
         photo = dict(key='apms/photos/'+'a'*64+'.jpg', bytes=123, mime='image/jpeg')
-        self.assertEqual(advance(INITIAL_CHAIN, row, photo), 'd5ed239d7a8903047d3b1ff24c5ac666d08ba05a38784fc6198723a67acab578')
+        self.assertEqual(advance(INITIAL_CHAIN, row, photo), '25f0beaba9ab422cfe17d3be38b2555abd41182ce0885c67debd4e71d43d5dc3')
 
     def test_lost_creation_response_reuses_request_id_across_process_restart(self):
         with tempfile.TemporaryDirectory() as root:

@@ -111,9 +111,10 @@ class LostApiTest(unittest.TestCase):
 
     def test_valid_request_passes_all_conditions_to_search(self):
         with patch.object(api, "search_photo", return_value={"candidates": []}) as search:
-            response = self.post({"species": "DOG", "lostDate": "2026-09-08", "region": "상주시", "description": "갈색 귀"})
+            response = self.post({"species": "DOG", "lostDate": "2026-09-08", "region": "상주시", "description": "갈색 귀",
+                                  "includeAdoptedOrReturned": "true"})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(search.call_args.args[1:], ("DOG", date(2026,9,8), "상주시", "갈색 귀"))
+        self.assertEqual(search.call_args.args[1:], ("DOG", date(2026,9,8), "상주시", "갈색 귀", True))
 
     def test_unauthenticated_request_does_not_search(self):
         with patch.object(api, "search_photo") as search:
@@ -121,7 +122,8 @@ class LostApiTest(unittest.TestCase):
         search.assert_not_called()
 
     def test_invalid_species_date_and_long_description_do_not_search(self):
-        for fields in ({"species":"ETC"}, {"species":"DOG","lostDate":"bad"}, {"species":"CAT","description":"x"*501}):
+        for fields in ({"species":"ETC"}, {"species":"DOG","lostDate":"bad"}, {"species":"CAT","description":"x"*501},
+                       {"species":"DOG","includeAdoptedOrReturned":"invalid"}):
             with self.subTest(fields=str(fields)[:40]), patch.object(api,"search_photo") as search:
                 self.assertEqual(self.post(fields).status_code,422)
                 search.assert_not_called()
@@ -134,7 +136,7 @@ class LostApiTest(unittest.TestCase):
         with patch.object(api, "search_photo", return_value={"candidates": []}) as search:
             response = self.post({"species": "DOG", "region": "  ", "description": "  갈색 귀  "})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(search.call_args.args[3:], (None, "갈색 귀"))
+        self.assertEqual(search.call_args.args[3:], (None, "갈색 귀", False))
 
     def test_image_and_request_size_limits(self):
         with patch.object(api,"search_photo") as search:
@@ -155,7 +157,7 @@ class LostApiTest(unittest.TestCase):
 
 
 class RetrievalContractTest(unittest.TestCase):
-    def test_query_has_species_but_no_status_date_or_region_exclusion(self):
+    def test_default_query_filters_active_status_before_candidate_pool_with_legacy_fallback(self):
         import sys
         import types
         from unittest.mock import MagicMock, create_autospec
@@ -175,13 +177,37 @@ class RetrievalContractTest(unittest.TestCase):
             result = search_photo(photo(), "DOG", date(2026,9,8), "상주시", "흰색")
         args = module.es.options.return_value.search.call_args.kwargs
         self.assertEqual(args["query"]["script_score"]["query"]["bool"]["filter"], [
-            {"term":{"species":"DOG"}}, {"term":{"model_version":"test-model"}}, {"exists":{"field":"image_vector"}}, {"exists":{"field":"id"}}])
+            {"term":{"species":"DOG"}}, {"term":{"model_version":"test-model"}},
+            {"bool": {"should": [
+                {"terms": {"status": ("NOTICE", "PROTECT")}},
+                {"bool": {"must_not": {"exists": {"field": "status"}}}}
+            ], "minimum_should_match": 1}},
+            {"exists":{"field":"image_vector"}}, {"exists":{"field":"id"}}])
         self.assertEqual(result["candidates"][0]["animalId"],7)
         self.assertEqual(args["size"],200)
         self.assertEqual(args["index"], "animals-lost-dinov3-large-v1")
         module.es.options.assert_called_once_with(request_timeout=15, max_retries=0)
         module.es.update.assert_not_called()
         module.es.index.assert_not_called()
+
+    def test_resolved_option_adds_only_adopted_and_returned_to_es_filter(self):
+        import sys
+        import types
+        from unittest.mock import MagicMock
+        from app.services.lost_search import search_photo
+        encoder = types.ModuleType("app.services.dinov3")
+        encoder.get_encoder = MagicMock()
+        encoder.get_encoder.return_value.encode_with_metadata.return_value = types.SimpleNamespace(
+            vector=[.1, .2], model_version="test-model", focus_status="original_multiple_animals",
+            animal_vector=None, coat_color=None)
+        encoder.gallery_index = lambda: "animals-lost-dinov3-large-v1"
+        module = types.ModuleType("app.es.client"); module.es = MagicMock()
+        module.es.options.return_value.search.return_value = {"hits": {"hits": []}}
+        with patch.dict(sys.modules, {"app.services.dinov3": encoder, "app.es.client": module}):
+            search_photo(photo(), "DOG", include_adopted_or_returned=True)
+        filters = module.es.options.return_value.search.call_args.kwargs["query"]["script_score"]["query"]["bool"]["filter"]
+        self.assertEqual(filters[2]["bool"]["should"][0],
+                         {"terms": {"status": ("NOTICE", "PROTECT", "ADOPTED", "RETURNED")}})
 
     def test_animal_channel_is_only_combined_when_the_gallery_document_has_it(self):
         import sys
