@@ -13,7 +13,10 @@ from app.services.gallery_prefetch import PhotoPrefetch
 
 CONTRACT = "pawbridge-lost-gallery-v1"
 PREFIX = "animals-lost-dinov3-sam3-"
-METADATA = ("happen_date", "happen_place", "color", "special_mark", "description")
+METADATA_VERSION = "status-policy-v1"
+STATUSES = frozenset(("NOTICE", "PROTECT", "ADOPTION_PENDING", "ADOPTED", "EUTHANIZED",
+                      "NATURAL_DEATH", "RETURNED", "DONATED", "RELEASED", "ESCAPED", "UNKNOWN"))
+METADATA = ("status", "happen_date", "happen_place", "color", "special_mark", "description")
 
 
 def read_manifest(path):
@@ -32,6 +35,8 @@ def read_manifest(path):
                 or not re.fullmatch(r"[a-f0-9]{64}", row.get("source_sha256", ""))):
             raise ValueError("Invalid or duplicate gallery record")
         seen.add(row["id"])
+        if row.get("status") not in STATUSES:
+            raise ValueError("Invalid gallery status")
         for field in METADATA:
             value = row.get(field)
             if value is not None and (not isinstance(value, str) or len(value) > 10000):
@@ -68,13 +73,16 @@ def gallery_mapping(snapshot_hash):
                   "coat_color": {"type": "object", "enabled": False},
                   "image_vector": {"type": "dense_vector", "dims": DIMENSIONS, "index": False},
                   "animal_vector": {"type": "dense_vector", "dims": DIMENSIONS, "index": False}}
-    properties.update({key: {"type": "keyword", "index": False} for key in METADATA})
+    properties["status"] = {"type": "keyword"}
+    properties.update({key: {"type": "keyword", "index": False} for key in METADATA if key != "status"})
     return {"dynamic": "strict", "_meta": {"contract": CONTRACT, "model_version": FOCUS_VERSION,
-                                             "snapshot_sha256": snapshot_hash, "coat_color_version": COLOR_VERSION}, "properties": properties}
+                                             "snapshot_sha256": snapshot_hash, "coat_color_version": COLOR_VERSION,
+                                             "metadata_version": METADATA_VERSION}, "properties": properties}
 
 
 def gallery_target(snapshot_hash):
-    return PREFIX + "build-" + hashlib.sha256((FOCUS_VERSION + COLOR_VERSION + snapshot_hash).encode()).hexdigest()[:24]
+    return PREFIX + "build-" + hashlib.sha256(
+        (FOCUS_VERSION + COLOR_VERSION + METADATA_VERSION + snapshot_hash).encode()).hexdigest()[:24]
 
 
 class GalleryBuildCancelled(RuntimeError):

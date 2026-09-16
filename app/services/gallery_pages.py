@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from app.services.gallery_source import GallerySource, atomic_json, read_bounded, MAX_PHOTO_BYTES
-from app.services.lost_gallery import GalleryBuildCancelled, METADATA
+from app.services.lost_gallery import GalleryBuildCancelled, METADATA, STATUSES
 
 PROTOCOL = 'pawbridge-gallery-pages-v2'
 PAGE_BYTES = 2 * 1024 * 1024
@@ -175,6 +175,8 @@ class PagedGallerySource(GallerySource):
                 or photo.get('mime') not in ('image/jpeg', 'image/png', 'image/webp')
                 or not re.fullmatch(r'apms/photos/[a-f0-9]{64}\.(jpg|png|webp)', photo.get('key', ''))):
             raise ValueError('Invalid gallery record or photo integrity metadata')
+        if row.get('status') not in STATUSES:
+            raise ValueError('Invalid gallery status')
         for field in METADATA:
             value = row.get(field)
             if value is not None and (not isinstance(value, str) or len(value) > 10000):

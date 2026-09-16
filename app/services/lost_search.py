@@ -15,6 +15,8 @@ MAX_RESULTS = 20
 AUXILIARY_BOOST = 0.01
 # Provisional evaluation weight, not a calibrated identity probability.
 ANIMAL_REGION_WEIGHT = 0.7
+ACTIVE_STATUSES = ("NOTICE", "PROTECT")
+RESOLVED_STATUSES = ("ADOPTED", "RETURNED")
 
 
 class InvalidPhoto(ValueError):
@@ -89,7 +91,7 @@ def rank_candidates(hits, lost_date=None, region=None, description=None, *, coat
     return candidates[:MAX_RESULTS]
 
 
-def search_photo(data, species, lost_date=None, region=None, description=None):
+def search_photo(data, species, lost_date=None, region=None, description=None, include_adopted_or_returned=False):
     from app.services.dinov3 import get_encoder, gallery_index
     from app.es.client import es
     color_weight = ranking_weight()
@@ -107,11 +109,19 @@ def search_photo(data, species, lost_date=None, region=None, description=None):
                       "return 1.0 + original;",
             "params": {"vector": embedding.vector, "animal": embedding.animal_vector,
                        "weight": ANIMAL_REGION_WEIGHT}}
+    allowed_statuses = ACTIVE_STATUSES + (RESOLVED_STATUSES if include_adopted_or_returned else ())
+    # Missing status keeps a legacy gallery searchable during a staged rollout;
+    # Animal Service always rechecks the current MySQL status before responding.
+    status_filter = {"bool": {"should": [
+        {"terms": {"status": allowed_statuses}},
+        {"bool": {"must_not": {"exists": {"field": "status"}}}}
+    ], "minimum_should_match": 1}}
     response = es.options(request_timeout=15, max_retries=0).search(
         index=gallery_index(), size=CANDIDATE_POOL, timeout="10s",
         query={"script_score": {
             "query": {"bool": {"filter": [
                 {"term": {"species": species}}, {"term": {"model_version": embedding.model_version}},
+                status_filter,
                 {"exists": {"field": "image_vector"}},
                 {"exists": {"field": "id"}}]}},
             "script": script}},
