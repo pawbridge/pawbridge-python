@@ -166,7 +166,11 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         for row in batch:
             cached = cache.get(row["id"], {})
             reuse_vector = reusable_document(cached, row)
-            needs_color = (reuse_vector and cached.get("focus_status") == "animal_mask"
+            # v2 reruns only paths that can produce color with the unchanged
+            # segmenter. Multi-detection photos gain primary-mask evidence;
+            # prior no/small/suspect-mask outcomes remain deterministically null.
+            needs_color = (reuse_vector
+                           and cached.get("focus_status") in {"animal_mask", "original_multiple_animals"}
                            and not reusable_color(cached))
             planned.append((row, cached, reuse_vector, needs_color))
         to_fetch = [row for row, _, reuse, color in planned if not reuse or color]
@@ -183,7 +187,6 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
                     reused += 1
                     if reusable_color(cached):
                         color = cached.get("coat_color")
-                # A previously rejected mask has no usable foreground to backfill.
                 if not reuse_vector or needs_color:
                     context = (prefetch.photo(row) if photo_provider is not None else
                                nullcontext(root / (row["source_sha256"] + ".image")))
