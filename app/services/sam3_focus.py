@@ -1,4 +1,5 @@
 """Pinned SAM 3 image-only segmentation; no model downloads or image synthesis."""
+from contextlib import nullcontext
 import hashlib
 import os
 from pathlib import Path
@@ -103,13 +104,17 @@ class Sam3Focus:
             state["geometric_prompt"] = self.model._get_dummy_prompt()
         return self.processor._forward_grounding(state)
 
-    def prepare(self, image, species):
+    def prepare(self, image, species, *, prepared_image=None):
         import torch
         from PIL import Image
         if species not in {"DOG", "CAT"}:
             raise ValueError("Animal focus requires DOG or CAT")
-        with image.copy() as working:
-            working.thumbnail((1024, 1024), Image.Resampling.BICUBIC)
+        context = image.copy() if prepared_image is None else nullcontext(prepared_image)
+        with context as working:
+            if prepared_image is None:
+                working.thumbnail((1024, 1024), Image.Resampling.BICUBIC)
+            elif working.mode != "RGB" or max(working.size) > 1024:
+                raise ValueError("Prepared SAM 3 image must be bounded RGB")
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
                 state = self.processor.set_image(working)
                 prediction = self._set_species_prompt(state, species)

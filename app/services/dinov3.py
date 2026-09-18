@@ -103,26 +103,29 @@ class DinoV3Encoder:
             vector = functional.normalize(self.model(tensor).float(), dim=-1)
         return validate_vector(vector.squeeze(0).cpu().tolist())
 
-    def encode_with_metadata(self, image, species=None, *, background=False):
+    def encode_with_metadata(self, image, species=None, *, background=False, prepared_focus_image=None):
         # Hold one lock across detection and both embeddings; no concurrent GPU jobs.
         import torch
         with self.gate.acquire(background=background):
             try:
-                return self._encode_image(image, species)
+                if prepared_focus_image is None:
+                    return self._encode_image(image, species)
+                return self._encode_image(image, species, prepared_focus_image=prepared_focus_image)
             except torch.cuda.OutOfMemoryError:
                 pass
             # Leave the exception scope first so failed inference tensors are released.
             torch.cuda.empty_cache()
             raise RuntimeError("GPU memory exhausted during lost-animal search")
 
-    def describe_coat_color(self, image, species, *, background=False):
+    def describe_coat_color(self, image, species, *, background=False, prepared_focus_image=None):
         # Reuse the loaded segmenter without recomputing either DINO vector.
         import torch
         with self.gate.acquire(background=background):
             try:
                 if self.focus is None:
                     raise RuntimeError("Color backfill requires an animal-focus encoder")
-                prepared = self.focus.prepare(image, species)
+                arguments = {} if prepared_focus_image is None else {"prepared_image": prepared_focus_image}
+                prepared = self.focus.prepare(image, species, **arguments)
                 try:
                     return prepared.coat_color
                 finally:
@@ -132,7 +135,7 @@ class DinoV3Encoder:
             torch.cuda.empty_cache()
             raise RuntimeError("GPU memory exhausted during color backfill")
 
-    def _encode_image(self, image, species):
+    def _encode_image(self, image, species, *, prepared_focus_image=None):
         if self.focus is None:
             return AnimalEmbedding(self._vector_for(image), self.model_version, "original_profile")
         from app.services.animal_focus import square_image
@@ -140,7 +143,8 @@ class DinoV3Encoder:
         # after JPEG recompression or is ambiguous on only one side of the search.
         with square_image(image) as original:
             full_vector = self._vector_for(original)
-        prepared = self.focus.prepare(image, species)
+        arguments = {} if prepared_focus_image is None else {"prepared_image": prepared_focus_image}
+        prepared = self.focus.prepare(image, species, **arguments)
         try:
             animal_vector = self._vector_for(prepared.image) if prepared.status == "animal_mask" else None
             return AnimalEmbedding(full_vector, self.model_version, prepared.status, animal_vector, prepared.coat_color)
