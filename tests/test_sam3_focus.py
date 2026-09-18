@@ -140,6 +140,38 @@ class Sam3ContractTest(unittest.TestCase):
         self.assertFalse(encoder.gate.active)
 
 
+    @unittest.skipIf(torch is None, "Requires the dedicated PyTorch runtime")
+    def test_background_prepared_input_reaches_focus_inside_the_shared_gate(self):
+        from types import SimpleNamespace
+        from app.services.animal_focus import FocusResult
+        from app.services.inference_gate import InferenceGate
+        from app.services.gallery_runtime import BackgroundEncoder
+        encoder = object.__new__(DinoV3Encoder)
+        encoder.model_version = "test"
+        encoder.gate = InferenceGate()
+        encoder._vector_for = lambda image: [1.] + [0.] * 1023
+        color = {"test": "descriptor"}
+        with Image.new("RGB", (32, 32)) as original, Image.new("RGB", (16, 16)) as small:
+            calls = []
+            def prepare(image, species, *, prepared_image):
+                self.assertTrue(encoder.gate.active)
+                self.assertIs(image, original)
+                self.assertIs(prepared_image, small)
+                self.assertEqual(species, "DOG")
+                calls.append(species)
+                return FocusResult(Image.new("RGB", (32, 32)), "animal_mask", color)
+            encoder.focus = SimpleNamespace(prepare=prepare)
+            worker = BackgroundEncoder(encoder)
+            with patch.object(encoder.gate, "acquire", wraps=encoder.gate.acquire) as admission:
+                self.assertEqual(worker.encode_with_metadata(original, "DOG", prepared_focus_image=small).coat_color, color)
+                self.assertFalse(encoder.gate.active)
+                self.assertEqual(worker.describe_coat_color(original, "DOG", prepared_focus_image=small), color)
+                self.assertFalse(encoder.gate.active)
+                self.assertEqual([call.kwargs for call in admission.call_args_list],
+                                 [{"background": True}, {"background": True}])
+            self.assertEqual(calls, ["DOG", "DOG"])
+
+
 class Sam3ThroughputTest(unittest.TestCase):
     @unittest.skipIf(torch is None, "Requires the dedicated PyTorch runtime")
     def test_species_text_is_reused_without_reusing_or_mutating_image_state(self):

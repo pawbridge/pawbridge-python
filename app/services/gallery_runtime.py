@@ -25,11 +25,13 @@ class BackgroundEncoder:
         self.encoder = encoder
         self.model_version = encoder.model_version
 
-    def encode_with_metadata(self, image, species):
-        return self.encoder.encode_with_metadata(image, species, background=True)
+    def encode_with_metadata(self, image, species, *, prepared_focus_image=None):
+        return self.encoder.encode_with_metadata(image, species, background=True,
+                                                 prepared_focus_image=prepared_focus_image)
 
-    def describe_coat_color(self, image, species):
-        return self.encoder.describe_coat_color(image, species, background=True)
+    def describe_coat_color(self, image, species, *, prepared_focus_image=None):
+        return self.encoder.describe_coat_color(image, species, background=True,
+                                                prepared_focus_image=prepared_focus_image)
 
 
 class GalleryRefresh:

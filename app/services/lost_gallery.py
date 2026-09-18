@@ -5,11 +5,10 @@ import json
 import re
 from pathlib import Path
 
-from PIL import Image, ImageOps
 from app.services.dinov3 import DIMENSIONS, validate_vector
 from app.services.sam3_focus import FOCUS_VERSION
 from app.services.coat_color import VERSION as COLOR_VERSION, valid as valid_color
-from app.services.gallery_prefetch import PhotoPrefetch
+from app.services.gallery_inputs import GalleryInputPrefetch
 
 CONTRACT = "pawbridge-lost-gallery-v1"
 PREFIX = "animals-lost-dinov3-sam3-"
@@ -175,8 +174,9 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
             planned.append((row, cached, reuse_vector, needs_color))
         to_fetch = [row for row, _, reuse, color in planned if not reuse or color]
         check_cancelled()
-        downloads = (PhotoPrefetch(to_fetch, photo_provider)
-                     if photo_provider is not None and to_fetch else nullcontext())
+        provider = photo_provider or (lambda row: nullcontext(root / (row["source_sha256"] + ".image")))
+        downloads = (GalleryInputPrefetch(to_fetch, provider, root, check_cancelled)
+                     if to_fetch else nullcontext())
         with downloads as prefetch:
             operations = []
             for row, cached, reuse_vector, needs_color in planned:
@@ -188,40 +188,21 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
                     if reusable_color(cached):
                         color = cached.get("coat_color")
                 if not reuse_vector or needs_color:
-                    context = (prefetch.photo(row) if photo_provider is not None else
-                               nullcontext(root / (row["source_sha256"] + ".image")))
-                    with context as supplied_path:
-                        path = Path(supplied_path).resolve(strict=True)
-                        if not path.is_relative_to(root):
-                            raise ValueError("Gallery photo escapes the configured root")
-                        if path.stat().st_size > 10 * 1024 * 1024:
-                            raise ValueError("Gallery photo exceeds 10MiB")
-                        digest = hashlib.sha256()
-                        with path.open("rb") as source:
-                            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                                digest.update(chunk)
-                        if digest.hexdigest() != row["source_sha256"]:
-                            raise ValueError("Gallery photo hash mismatch")
-                        with Image.open(path) as source:
-                            # Some APMS JPEGs are MPO containers (primary + auxiliary photo).
-                            # Match the evaluated gallery's primary-frame policy; no animation.
-                            source.seek(0)
-                            if (source.width * source.height > 16_000_000
-                                    or (getattr(source, "n_frames", 1) != 1 and source.format != "MPO")):
-                                raise ValueError("Gallery photo must have a bounded primary still image")
-                            with ImageOps.exif_transpose(source).convert("RGB") as image:
-                                if reuse_vector:
-                                    color = encoder.describe_coat_color(image, row["species"])
-                                else:
-                                    embedding = encoder.encode_with_metadata(image, row["species"])
-                                    if embedding.model_version != FOCUS_VERSION:
-                                        raise RuntimeError("Encoder changed model during the build")
-                                    vector, animal, status = embedding.vector, embedding.animal_vector, embedding.focus_status
-                                    color = embedding.coat_color
-                                    validate_vector(vector)
-                                    if animal is not None:
-                                        validate_vector(animal)
-                                    encoded += 1
+                    with prefetch.photo(row) as prepared:
+                        if reuse_vector:
+                            color = encoder.describe_coat_color(prepared.original, row["species"],
+                                                                prepared_focus_image=prepared.focus)
+                        else:
+                            embedding = encoder.encode_with_metadata(prepared.original, row["species"],
+                                                                     prepared_focus_image=prepared.focus)
+                            if embedding.model_version != FOCUS_VERSION:
+                                raise RuntimeError("Encoder changed model during the build")
+                            vector, animal, status = embedding.vector, embedding.animal_vector, embedding.focus_status
+                            color = embedding.coat_color
+                            validate_vector(vector)
+                            if animal is not None:
+                                validate_vector(animal)
+                            encoded += 1
                     color_processed += 1
                 if color is not None:
                     if not valid_color(color):
