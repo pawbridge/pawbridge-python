@@ -39,6 +39,46 @@ class FocusStartupTest(unittest.TestCase):
                 asyncio.run(enter())
             self.assertEqual(run.call_count, 2)
 
+    def test_enabled_sync_rebuilds_a_stale_color_gallery_before_becoming_ready(self):
+        import asyncio
+        import tempfile
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, Mock
+        from app.lost_main import lifespan, ColorGalleryRefreshRequired
+        from app.services import gallery_runtime
+        app = SimpleNamespace(state=SimpleNamespace())
+        refresh = Mock(ready=False)
+        source = Mock()
+        environment = {
+            "INTERNAL_API_KEY": "test-key",
+            "LOST_SEARCH_VISUAL_PROFILE": "sam3-animal-focus",
+            "LOST_SEARCH_INDEX": "animals-lost-dinov3-sam3-eval-v1",
+            "LOST_SEARCH_COAT_COLOR_WEIGHT": ".1",
+            "LOST_GALLERY_SYNC_ENABLED": "true",
+            "LOST_GALLERY_PROTOCOL": "v2",
+            "LOST_GALLERY_SOURCE_URL": "http://127.0.0.1/feed",
+            "LOST_GALLERY_SOURCE_KEY": "private",
+            "LOST_GALLERY_R2_HOST": "r2.invalid",
+            "LOST_GALLERY_PHOTO_ROOT": "/tmp/photos",
+        }
+        async def enter():
+            async with lifespan(app):
+                self.assertIs(app.state.gallery_refresh, refresh)
+        with tempfile.TemporaryDirectory() as directory:
+            environment["LOST_GALLERY_STATE_DIR"] = directory
+            with patch.dict(os.environ, environment, clear=True), \
+                    patch("app.lost_main.anyio.to_thread.run_sync", new_callable=AsyncMock,
+                          side_effect=[object(), ColorGalleryRefreshRequired("stale color"), None]) as run, \
+                    patch.object(gallery_runtime, "runtime_owner", return_value=nullcontext()), \
+                    patch.object(gallery_runtime, "GalleryRefresh", return_value=refresh) as factory, \
+                    patch("app.services.gallery_pages.PagedGallerySource", return_value=source):
+                asyncio.run(enter())
+        self.assertFalse(factory.call_args.kwargs["ready"])
+        refresh.start.assert_called_once_with()
+        self.assertEqual(run.call_count, 3)
+        self.assertIs(run.call_args_list[-1].args[0], refresh.close)
+
     def test_color_ranking_requires_new_gallery_contract_but_disabled_mode_can_start_on_old_gallery(self):
         from app.services.lost_gallery import gallery_mapping
         from app.services.sam3_focus import FOCUS_VERSION

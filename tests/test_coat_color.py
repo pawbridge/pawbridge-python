@@ -23,6 +23,24 @@ def descriptor(color):
         return describe(image, mask)
 
 
+def synthetic_descriptor(points):
+    from app.services.coat_color import JOINT_BINS, MARGINAL_BINS
+    joint = np.zeros((JOINT_BINS, JOINT_BINS, JOINT_BINS))
+    for point in points:
+        joint[point] += 1 / len(points)
+    marginal = []
+    # Put the same discrete joint mass into the nearest 32-bin positions. This
+    # fixture can create equal marginals with deliberately different color
+    # combinations, the information v1 could not retain.
+    for axis in range(3):
+        values = np.zeros(MARGINAL_BINS)
+        for point in points:
+            values[round(point[axis] * (MARGINAL_BINS - 1) / (JOINT_BINS - 1))] += 1 / len(points)
+        marginal.extend(values.tolist())
+    return {"version": VERSION, "source": "single_mask", "pixels": 1000,
+            "marginal": marginal, "joint": joint.ravel().tolist()}
+
+
 class CoatColorTest(unittest.TestCase):
     def test_background_and_small_boundary_changes_do_not_change_foreground(self):
         first, mask = swatch((110, 70, 35), "blue")
@@ -54,9 +72,16 @@ class CoatColorTest(unittest.TestCase):
         self.assertGreater(mismatch(a, b), .15)
         self.assertLess(mismatch(a, c), .05)
 
+    def test_joint_distribution_distinguishes_color_combinations_with_equal_marginals(self):
+        correlated = synthetic_descriptor([(1, 1, 1), (6, 6, 6)])
+        crossed = synthetic_descriptor([(1, 6, 1), (6, 1, 6)])
+        self.assertTrue(valid(correlated))
+        self.assertTrue(valid(crossed))
+        self.assertGreater(mismatch(correlated, crossed), .6)
+
     def test_unavailable_wrong_version_or_invalid_features_are_not_a_mismatch(self):
         good = descriptor("black")
-        corrupt = copy.deepcopy(good); corrupt["histogram"][0] = float("nan")
+        corrupt = copy.deepcopy(good); corrupt["joint"][0] = float("nan")
         for bad in (None, {}, dict(good, version="old"), corrupt):
             self.assertIsNone(mismatch(good, bad))
         image, mask = swatch("black")

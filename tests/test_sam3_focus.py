@@ -50,18 +50,32 @@ class Sam3ContractTest(unittest.TestCase):
             finally:
                 result.image.close()
 
-    def test_missing_and_multiple_detections_keep_full_photo(self):
+    def test_missing_detection_keeps_full_photo_without_color(self):
         with Image.new("RGB", (120, 120), "red") as image:
-            for count, expected in [(0, "original_no_confident_animal"),
-                                    (2, "original_multiple_animals")]:
-                with self.subTest(count=count):
-                    result = prepare_prediction(image, np.zeros((count, 4)),
-                                                np.zeros((count, 120, 120)), np.ones(count))
-                    try:
-                        self.assertEqual(result.status, expected)
-                        self.assertEqual(result.image.getpixel((0, 0)), (255, 0, 0))
-                    finally:
-                        result.image.close()
+            result = prepare_prediction(image, np.zeros((0, 4)),
+                                        np.zeros((0, 120, 120)), np.ones(0))
+            try:
+                self.assertEqual(result.status, "original_no_confident_animal")
+                self.assertIsNone(result.coat_color)
+                self.assertEqual(result.image.getpixel((0, 0)), (255, 0, 0))
+            finally:
+                result.image.close()
+
+    def test_multiple_detections_keep_full_photo_but_retain_primary_mask_color(self):
+        with Image.new("RGB", (120, 120), "red") as image:
+            masks = np.zeros((2, 120, 120))
+            masks[0, 20:100, 20:100] = 1
+            masks[1, 25:95, 25:95] = 1
+            result = prepare_prediction(image, [[10, 10, 110, 110], [20, 20, 100, 100]],
+                                        masks, [.8, .9])
+            try:
+                self.assertEqual(result.status, "original_multiple_animals")
+                self.assertEqual(result.image.getpixel((0, 0)), (255, 0, 0))
+                self.assertEqual(result.coat_color["source"], "primary_mask")
+                from app.services.coat_color import valid
+                self.assertTrue(valid(result.coat_color))
+            finally:
+                result.image.close()
 
     def test_malformed_model_output_is_failure_not_no_detection(self):
         with Image.new("RGB", (120, 120)) as image:

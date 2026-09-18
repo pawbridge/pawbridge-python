@@ -74,7 +74,7 @@ def same_instance(first_box, first_mask, second_box, second_mask):
     return smaller > 0 and np.logical_and(a, b).sum() / smaller >= .9
 
 
-def prepare_focus(image, box, mask):
+def prepare_focus(image, box, mask, *, color_source="single_mask"):
     """Return a bounded, aspect-preserving view; never modify the source image."""
     import numpy as np
     width, height = image.size
@@ -104,7 +104,7 @@ def prepare_focus(image, box, mask):
     from app.services.coat_color import describe
     color_mask = np.zeros_like(foreground)
     color_mask[bounds[1]:bounds[3], bounds[0]:bounds[2]] = probabilities[bounds[1]:bounds[3], bounds[0]:bounds[2]] >= .9
-    color = describe(image, color_mask)
+    color = describe(image, color_mask, source=color_source)
     # Only use the selected instance, with a small context margin around its box.
     dx, dy = (x2-x1)*.1, (y2-y1)*.1
     crop = (max(0, math.floor(x1-dx)), max(0, math.floor(y1-dy)),

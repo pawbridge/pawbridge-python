@@ -8,6 +8,10 @@ from app.routers.lost_search import router
 from app.services.dinov3 import get_encoder, gallery_index, visual_profile, DIMENSIONS
 
 
+class ColorGalleryRefreshRequired(RuntimeError):
+    """The active alias is safe to read but must be rebuilt before ranking."""
+
+
 def validate_focus_gallery(encoder):
     from app.es.client import es
     index = gallery_index()
@@ -24,7 +28,7 @@ def validate_focus_gallery(encoder):
         raise RuntimeError("Animal focus gallery mapping/version mismatch")
     from app.services.coat_color import VERSION as COLOR_VERSION, ranking_weight
     if ranking_weight() and mapping.get("_meta", {}).get("coat_color_version") != COLOR_VERSION:
-        raise RuntimeError("Coat-color ranking requires a completed color gallery")
+        raise ColorGalleryRefreshRequired("Coat-color ranking requires a completed color gallery")
     count = client.count(index=index, query={"bool": {"filter": [
         {"term": {"model_version": encoder.model_version}},
         {"exists": {"field": "image_vector"}}, {"exists": {"field": "id"}}]}})["count"]
@@ -59,7 +63,7 @@ async def lifespan(app):
             from elasticsearch import NotFoundError
             try:
                 await anyio.to_thread.run_sync(validate_focus_gallery, encoder)
-            except NotFoundError:
+            except (NotFoundError, ColorGalleryRefreshRequired):
                 if not enabled:
                     raise
                 ready = False

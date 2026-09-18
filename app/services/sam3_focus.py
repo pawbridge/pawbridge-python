@@ -35,9 +35,26 @@ def prepare_prediction(image, boxes, masks, scores):
             or (scores < 0).any() or (scores > 1).any()
             or (masks < 0).any() or (masks > 1).any()):
         raise RuntimeError("Invalid SAM 3 prediction")
-    if len(scores) != 1:
-        status = "original_multiple_animals" if len(scores) > 1 else "original_no_confident_animal"
-        return FocusResult(square_image(image), status)
+    if len(scores) == 0:
+        return FocusResult(square_image(image), "original_no_confident_animal")
+    if len(scores) > 1:
+        # Keep the identity embedding conservative (the full photo), but retain
+        # color evidence from the primary foreground instead of silently making
+        # every multi-detection candidate color-neutral. Mask area weighted by
+        # confidence favors the main subject while the descriptor records that
+        # it came from a primary, not unambiguous, mask.
+        areas = (masks >= .5).sum(axis=(1, 2))
+        selected = max(range(len(scores)), key=lambda i: (areas[i] * scores[i], scores[i]))
+        box = boxes[selected].tolist()
+        box[0], box[1] = max(0, box[0]), max(0, box[1])
+        box[2], box[3] = min(image.width, box[2]), min(image.height, box[3])
+        focused = prepare_focus(image, box, masks[selected].astype("float32"),
+                                color_source="primary_mask")
+        try:
+            return FocusResult(square_image(image), "original_multiple_animals",
+                               focused.coat_color)
+        finally:
+            focused.image.close()
     # SAM's floating point boxes can extend slightly past the image boundary.
     box = boxes[0].tolist()
     box[0], box[1] = max(0, box[0]), max(0, box[1])

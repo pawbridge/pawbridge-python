@@ -135,7 +135,7 @@ class LostGalleryTest(unittest.TestCase):
                 old_mapping["_meta"].pop("coat_color_version")
                 es.indices.get_mapping.return_value = {old: {"mappings": old_mapping}}
                 cached = [dict(row, model_version=FOCUS_VERSION, image_vector=vector,
-                               animal_vector=vector, focus_status="animal_mask") for row in rows]
+                               animal_vector=vector, focus_status="original_multiple_animals") for row in rows]
                 cached[1].update(coat_color_version=VERSION, coat_color=color)
                 es.mget.side_effect = lambda index, ids: {"docs": [dict(found=True, _source=r) for r in cached]} if index == old else {"docs": []}
                 es.bulk.return_value = {"errors": False}; es.count.return_value = {"count": 2}
