@@ -1,0 +1,4 @@
+# Opt-in PostgreSQL storage. Install alongside the selected GPU/SAM runtime.
+# Existing Elasticsearch is the default until the migration gates pass.
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.2

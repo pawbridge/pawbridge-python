@@ -50,9 +50,12 @@ user unit은 WSL 자체나 Windows를 부팅시키지 않는다. 사용자 로�
 연결은 기존 `~/pawbridge-ai/ssh/vm-key`, `known_hosts`와 VM의 `vagrant` 계정을 사용한다. 키/known_hosts를 덮어쓰거나 host key 검증을 끄지 않는다. VM은 Python 3, 비대화형 `sudo kubectl`, UID 1000, SSH streamlocal forwarding이 필요하다. `GatewayPorts`를 바꾸지 않는다.
 
 - WSL `127.0.0.1:18082` → animal-service:8081: 운영 갤러리 목록 조회.
-- WSL `127.0.0.1:13306` → MySQL:3306: 기존 로컬 미리보기 연결 보존.
+- WSL `127.0.0.1:13306` → MySQL:3306: 기존 로컬 미리보기 연결 보존. 기본 `PAWBRIDGE_DATABASE_BACKEND=mysql` 경로다.
+- 선택형 `PAWBRIDGE_DATABASE_BACKEND=postgresql`: WSL `127.0.0.1:15432` → `databases/pawbridge-postgresql`:5432. 이 모드에서는 MySQL 서비스를 조회하거나 연결하지 않는다. GPU API/갤러리의 `LOST_PG_DSN`도 이 loopback 포트를 사용한다. DSN 계정은 제한된 벡터 역할이며 운영 비밀은 비공개 환경 파일에만 둔다.
 - VM `127.0.0.1:18091` → WSL `127.0.0.1:18090`: 기존 GPU loopback 연결 보존.
 - VM `/home/vagrant/.local/run/pawbridge-gpu/search.sock` → WSL `127.0.0.1:18090`: 운영 Pod 연결. 디렉터리 0700, SSH 소켓 0600, 프록시 UID 1000을 함께 맞춘다.
+
+터널 backend는 터널 systemd unit의 환경(예: 승인된 drop-in)에 설정한다. GPU 서비스의 `lost-search.env`만 수정해도 터널이 그 파일을 자동으로 읽는 것은 아니다. 전환 시 터널 선택과 `LOST_STORAGE_BACKEND=postgresql`/`LOST_PG_DSN`, 실제 PostgreSQL 서비스 이름·5432 포트를 함께 확인한다. 선택한 DB가 없으면 기존 소켓을 건드리기 전에 실패하며 다른 DB로 자동 대체하지 않는다. 코드/환경을 복구할 때는 기본 MySQL 경로와 기존 loopback13306도 함께 검증한다. 이 경로는 로컬 테스트만으로 운영 설치/접속이 완료되지 않는다.
 
 VM 재접속 시 서비스 IP를 다시 조회한다. 사용 중 소켓, 다른 파일·소유자·심볼릭 링크는 거절한다. 연결 거부를 확인한 동일 소켓만 정리하고 다시 연다. 설정/연결 실패는 30초 후 systemd가 재시도한다. 프로세스 관리자가 하나여야 하며 수동 중복 터널을 띄우지 않는다.
 
@@ -84,3 +87,56 @@ python3 -m unittest discover -s tests -p test_vm_bridge.py -v
 - `galleryRefresh.state=idle`, 새 `lastSuccess`, 별칭 대상의 `_meta.coat_color_version`, 문서 수와 유효 색 특징 비율을 확인한다. 전체 수와 색 특징 유효 수가 같은 것은 필수가 아니다. 마스크 실패는 명시적 무특징 상태로 남는다.
 - 보정 완료 후 별도의 승인된 활성화에서 감점 값을 지정하고 재시작한다. 기존 갤러리에 색 계약이 없으면 감점 활성 상태의 시작은 실패한다. 실제 사진 전후 순위·응답 지연을 확인한다. 사용자 사진을 원격 공개 API로 재전송하거나 보관하는 검증은 별도의 허용 범위 안에서만 수행한다.
 - 순위만 복구하려면 감점 값을 0으로 되돌리고 승인된 재시작을 실행한다. 데이터는 삭제하지 않는다. 코드 자체 복구가 필요하면 기존 릴리스 경로로 되돌린다. 새 갤러리는 DINOv3 벡터 계약과 기존 응답 모양을 유지하므로 이전 코드도 읽을 수 있지만, 구버전 갱신기는 구버전 물리 인덱스를 다시 만들 수 있다. 예기치 않은 재처리를 막으려면 코드 복구 시 자동 갱신을 일시 중지하고 기존 완성 별칭을 유지한다.
+
+
+## PostgreSQL 저장소 전환 검증 경로
+
+기본 `LOST_STORAGE_BACKEND=elasticsearch`는 기존 ES 검색/갤러리를 사용한다. 선택형 `postgresql`은 SAM 3 프로필만 지원하며, 별도 `requirements-lost-postgresql.txt`와 Animal 저장소의 PostgreSQL V1–V5가 필요하다. 스키마나 확장을 Python 시작 시 자동 생성하지 않는다. DB 역할/사설 연결/백업·복원/기존 ES 벡터 복사 검증 후 별도의 승인된 배포에서만 전환한다. 이 옵션의 구현이나 로컬 테스트가 운영 전환을 의미하지 않는다.
+
+- `LOST_PG_DSN`은 비밀 환경 파일에만 둔다. 기본 최대 연결2개, 허용1–4개, 대기열4개/획득3초, 연결3초/SQL10초/잠금2초로 제한한다. GPU 프로세스와 Spring Hikari 풀은 별도다. 프로세스 수를 곱한 전체 연결 예산은 별도로 확정해야 한다.
+- 조회·저장 함수 안에서만 연결을 빌린다. 검색은 읽기 전용 REPEATABLE READ로 공개본 검증과 후보 조회가 같은 DB 시점을 읽게 한다. 사진 다운로드/CPU 준비/SAM/DINO 추론은 연결 반납 후 수행한다. 최대100개 문서를 읽고 저장한 뒤 트랜잭션이 커밋된 경우에만 피드 커서를 진행한다.
+- `lost_gallery_builds/documents/heads`가 ES 물리 인덱스/문서/별칭 역할을 담당한다. 문서 수·전체 피드 검증 뒤 head를 트랜잭션 안에서 교체한다. 기존 head가 바뀌었으면 공개를 거부하며, 공개된 빌드는 불변이다. 이전 공개본/진행 중 빌드는 기존 보존 정책을 따르고 PostgreSQL 보존 일지는 별도 이름을 사용한다. 이 스냅샷은 현재 animals 행을 대신하지 않으며 최종 상태 확인은 Animal Service 책임이다.
+- 전체/동물 영역1024차원과 기존 모델·색 특징을 유지한다. 정확 코사인 + 기존0.7 동물 영역 가중치로 후보200개를 조회하고 Python 색/부가정보 재정렬로20개를 반환한다. ANN이나 새로운 점수 정책을 도입하지 않는다. DB/언어의 부동소수점 차이에 따른 경계 순위는 실제 벡터 대조가 필요하다.
+- 기존 ES 벡터 자동 복사 기능은 이 실행 경로에 없다. 복사 검증 없이 빈 PostgreSQL에서 자동 갱신을 켜면 사진을 다시 추론한다. 전환 전 별도 이관이 필요하며 DINOv2 384차원은 복사하지 않는다.
+- 실제 WSL system unit에 별도 `check_es.py` 시작 훅이 있는 경우, PostgreSQL 전환 시 해당 훅과 터널/사설 주소를 함께 검토해야 한다. 저장소의 범용 user unit만 바꿔서는 운영 unit이 바뀌지 않는다.
+- 되돌리기는 기존 ES 별칭·릴리스·환경 복원 후 승인된 재기동으로 수행한다. 실제 운영 DB/ES 삭제나 live head 교체는 검증 명령에 포함하지 않는다.
+
+새 PostgreSQL 통합 테스트는 GPU 없이 실제 DB에서 저장 원자성·기존 점수·연결 반납을 검사한다. 폐기 가능한 DB의 `migration_test_guard.guard = animal-pg-disposable` 표식과 스키마가 필요하며, 테스트 시작 시 갤러리 세 테이블을 비운다. **운영에 실행하지 않는다.**
+
+```sh
+ANIMAL_PG_MIGRATION_TEST_PORT=25437 python -m unittest discover -s tests/integration -p test_pg_gallery.py -v
+```
+
+
+## PostgreSQL 유사동물 추천 연결
+
+`app.lost_main`은 내부 인증을 요구하는 `GET /internal/animals/{animal_id}/similar?species=DOG|CAT`을 제공한다. 사진이나 벡터를 요청 본문으로 받지 않고, 공개된 PostgreSQL 갤러리의 해당 동물1024차원 벡터를 재사용한다. 모델·색 처리 버전이 맞지 않거나 기준 동물의 벡터가 없으면503이다. 자동 DINOv2 대체·요청 중 다운로드/재추론은 없다.
+
+- Animal Service의 `postgresql` 프로필은 `pawbridge.recommendation.backend=postgresql` 및 OSIV 비활성화를 선택한다. `lost-search.python-url`은 위 GPU 진입점, `python-ai-service.url`은 기존 챗봇 진입점으로 각각 유지한다. 내부 키는 기존 `python-ai-service.internal-api-key` 계약을 사용하며 Feign 로그/재시도 정책도 기존 내부 검색 설정을 따른다. 기본 프로필의 ES 추천은 유지한다.
+- Python GPU 프로세스는 `LOST_STORAGE_BACKEND=postgresql`, `sam3-animal-focus`와 대응하는 갤러리 이름이 필요하다. **기존 `app.main` 프로세스에도 전환 시 `LOST_STORAGE_BACKEND=postgresql`을 지정**해야 이전384차원 추천/배치 API 등록과 임베딩 모듈 로딩을 중단한다. 챗봇 API는 유지한다. 이것은 운영에 이미 적용된 설정이 아니다.
+- 비교 기준 동물은 입양 완료여도 된다. 후보는 같은 종이며 현재 `animals.status`가 NOTICE/PROTECT인 동물로 한정한다. SQL에서 상태를 먼저 거른 후 점수 상위200건을 선정하므로 종료 동물이 후보 자리를 소모하지 않는다. Animal Service가 응답 직전에 현재 상태를 다시 확인한다. 공고 종료일만으로 제외하지 않는다.
+- 전체/동물 영역 벡터의 기존0.7 조합과 같은 색 보정 함수를 재사용한다. 기존 추천의 최소 시각 점수0.6은 재정렬 전에 적용하며 최대6개 ID를 반환한다.0.6은 DINOv3 정확도를 실사진으로 보정한 기준이나 동일 개체 확률이 아니다. 색 가중치는 `LOST_SEARCH_COAT_COLOR_WEIGHT`를 공유한다.
+- DB 조회는 같은 공개본의 짧은 읽기 트랜잭션에서 끝내고 색 재정렬 전에 연결을 반납한다. GPU DB 역할에는 갤러리 테이블 권한 외에 `animals`의 `id`, `species`, `status` 컬럼 SELECT 권한이 필요하다. 계정·GRANT는 승인된 이관 단계에서 구성한다.
+- 운영 전환 게이트: 현재 `animals` 이관, 완성된 모델/색 계약의 갤러리 이관, 위 최소 조회 권한, 내부 중계의 새 GET 경로/키 전달, 실제 사용자 사진/추천 순위·응답 시간 비교를 확인한다. 로컬 단위/격리 DB 검증만으로 운영 공개를 판단하지 않는다.
+- 롤백은 승인된 이전 코드·프로필·ES 환경과 갤러리를 복원한다. PostgreSQL 벡터를384차원으로 변환하지 않는다. 빈 PG에서 무조건 자동 갤러리를 시작하면 재추론이 발생하므로 이관 검증 전에 활성화하지 않는다.
+
+### PostgreSQL 시작 검사와 system unit 후보 (운영 미설치)
+
+`check_storage.py`는 모델을 로딩하기 전에 선택한 저장소만 검사한다. PG에서는
+3초 연결/쿼리 제한과 읽기 전용 연결로 DB 이름, 제한된 역할, 1024차원 컬럼,
+갤러리 및 현재 상태 읽기 권한을 확인하고 연결을 닫는다. 실제 공개 갤러리의
+완성도와 모델 버전은 기존 애플리케이션 검증이 담당한다. 오류에는 DSN/비밀을
+출력하지 않는다. ES 기본값은 유지한다.
+
+`postgresql-cutover/`의 두 파일은 현재 확인한 `/home/shyu` system unit 전용
+후보이며 아직 설치되지 않았다. 실제 unit의 모든 ExecStartPre를 먼저 확인하고,
+승인된 설치에서 기존 `check_es.py` 하나를 `check_storage.py`로 교체한다.
+`ExecStartPre=`는 기존 훅을 전부 지우므로 새 훅이 추가되어 있으면 보존해야 한다.
+터널의 PG 선택과 GPU의 `LOST_STORAGE_BACKEND=postgresql`, 비공개 `LOST_PG_DSN`
+(loopback15432, 제한된 vector 역할)을 함께 전환한다. 기존 환경 파일의 내부 API
+키·모델 경로·갤러리 키 등은 유지한다. 갤러리 프로세스에도 같은 저장소 설정이
+필요하다. 파일 복사나 systemd reload/restart는 이 코드 변경에 포함하지 않는다.
+
+롤백은 승인된 변경 전 unit/env/실행 파일 사본으로 복구한다. 단, PostgreSQL에
+새 쓰기가 발생한 이후에는 설정만 MySQL/ES로 되돌리는 것이 데이터 롤백이 아니다.
+새 쓰기의 역반영과 CDC 정합성을 확인하기 전에는 이전 writer를 열지 않는다.

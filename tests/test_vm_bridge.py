@@ -6,7 +6,7 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, call
 
 spec = importlib.util.spec_from_file_location("vm_bridge", Path(__file__).parents[1] / "deploy/connect_vm.py")
 bridge = importlib.util.module_from_spec(spec)
@@ -76,6 +76,44 @@ class ForwardingTests(unittest.TestCase):
         for replacement in ({"animal": "8.8.8.8"}, {"socket": "/tmp/unexpected.sock"}):
             with self.subTest(replacement=replacement), self.assertRaises(RuntimeError):
                 bridge.forward_args(["ssh"], "host", data | replacement)
+
+    def test_postgresql_forwarding_is_loopback_only_and_has_no_mysql_dependency(self):
+        data = {"animal": "10.96.1.2", "postgresql": "10.96.3.4", "socket": "/home/vagrant/.local/run/pawbridge-gpu/search.sock"}
+        args = bridge.forward_args(["ssh"], "vagrant@192.168.57.11", data, "postgresql")
+        self.assertIn("127.0.0.1:15432:10.96.3.4:5432", args)
+        self.assertIn("127.0.0.1:18082:10.96.1.2:8081", args)
+        self.assertIn(data["socket"] + ":127.0.0.1:18090", args)
+        self.assertFalse(any("13306" in arg or "3306" in arg for arg in args))
+        with self.assertRaises(RuntimeError):
+            bridge.forward_args(["ssh"], "host", data | {"postgresql": "8.8.8.8"}, "postgresql")
+        with self.assertRaises(KeyError):
+            bridge.forward_args(["ssh"], "host", data, "mysql")
+
+    def test_postgresql_discovery_looks_up_only_selected_database_before_socket(self):
+        with patch.object(bridge.os, "getuid", return_value=1000), patch.object(bridge.Path, "home", return_value=Path("/home/vagrant")), patch.object(bridge, "service_ip", side_effect=["10.96.1.2", "10.96.3.4"]) as lookup, patch.object(bridge, "prepare_socket", return_value=Path("/home/vagrant/.local/run/pawbridge-gpu/search.sock")):
+            result = bridge.prepare_remote("postgresql")
+            self.assertEqual("10.96.3.4", result["postgresql"])
+            self.assertNotIn("mysql", result)
+            self.assertEqual([call("pawbridge", "animal-service", 8081), call("databases", "pawbridge-postgresql", 5432)], lookup.call_args_list)
+
+    def test_selected_database_failure_preserves_socket_and_does_not_fallback(self):
+        with patch.object(bridge.os, "getuid", return_value=1000), patch.object(bridge.Path, "home", return_value=Path("/home/vagrant")), patch.object(bridge, "service_ip", side_effect=["10.96.1.2", RuntimeError("unavailable")]) as lookup, patch.object(bridge, "prepare_socket") as prepare:
+            with self.assertRaises(RuntimeError):
+                bridge.prepare_remote("postgresql")
+            self.assertEqual(2, lookup.call_count)
+            prepare.assert_not_called()
+
+    def test_main_transmits_validated_backend_and_rejects_unknown_before_ssh(self):
+        data = {"animal": "10.96.1.2", "postgresql": "10.96.3.4", "socket": "/home/vagrant/.local/run/pawbridge-gpu/search.sock"}
+        with patch.dict(os.environ, {"PAWBRIDGE_DATABASE_BACKEND": "postgresql"}), patch.object(bridge.sys, "argv", ["connect_vm.py"]), patch.object(bridge.subprocess, "run") as run, patch.object(bridge.os, "execv") as execute:
+            run.return_value.stdout = json.dumps(data)
+            bridge.main()
+            self.assertEqual("python3 - --prepare-remote postgresql", run.call_args.args[0][-1])
+            self.assertIn("127.0.0.1:15432:10.96.3.4:5432", execute.call_args.args[1])
+        with patch.dict(os.environ, {"PAWBRIDGE_DATABASE_BACKEND": "postgresql; false"}), patch.object(bridge.sys, "argv", ["connect_vm.py"]), patch.object(bridge.subprocess, "run") as run:
+            with self.assertRaises(RuntimeError):
+                bridge.main()
+            run.assert_not_called()
 
     def test_discovery_failure_never_prepares_socket(self):
         with patch.object(bridge.os, "getuid", return_value=1000), patch.object(bridge.Path, "home", return_value=Path("/home/vagrant")), patch.object(bridge, "service_ip", side_effect=RuntimeError), patch.object(bridge, "prepare_socket") as prepare:

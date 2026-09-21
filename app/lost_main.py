@@ -5,6 +5,7 @@ import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from app.routers.lost_search import router
+from app.routers.recommendation import router as recommendation_router
 from app.services.dinov3 import get_encoder, gallery_index, visual_profile, DIMENSIONS
 
 
@@ -13,6 +14,12 @@ class ColorGalleryRefreshRequired(RuntimeError):
 
 
 def validate_focus_gallery(encoder):
+    from app.services.lost_storage import backend, get_postgresql_store
+    if backend() == 'postgresql':
+        from app.services.coat_color import VERSION as COLOR_VERSION, ranking_weight
+        get_postgresql_store().validate(gallery_index(), encoder.model_version,
+                                        COLOR_VERSION if ranking_weight() else None)
+        return
     from app.es.client import es
     index = gallery_index()
     client = es.options(request_timeout=10, max_retries=0)
@@ -55,28 +62,36 @@ async def lifespan(app):
     if protocol not in {'v1', 'v2'}:
         raise RuntimeError('Gallery protocol must be v1 or v2')
     source_class = PagedGallerySource if protocol == 'v2' else GallerySource
+    from app.services.lost_storage import storage_session, backend
+    from app.services.pg_gallery_store import GalleryUnavailable
+    if backend() == 'postgresql' and visual_profile() != 'sam3-animal-focus':
+        raise RuntimeError('PostgreSQL gallery requires the SAM 3 profile')
     # Acquire ownership before loading weights; CLI and API must use the same state directory.
-    with runtime_owner(state_dir) if state_dir else nullcontext():
+    with storage_session() as store, (runtime_owner(state_dir) if state_dir else nullcontext()):
         encoder = await anyio.to_thread.run_sync(get_encoder)
         ready = True
         if visual_profile() in {"animal-focus", "sam3-animal-focus"}:
             from elasticsearch import NotFoundError
             try:
                 await anyio.to_thread.run_sync(validate_focus_gallery, encoder)
-            except (NotFoundError, ColorGalleryRefreshRequired):
+            except (NotFoundError, ColorGalleryRefreshRequired, GalleryUnavailable):
                 if not enabled:
                     raise
                 ready = False
         refresh = None
         if enabled:
-            from app.es.client import es
+            if store is None:
+                from app.es.client import es
+            else:
+                es = None
             source = source_class(os.environ["LOST_GALLERY_SOURCE_URL"],
                                    os.environ["LOST_GALLERY_SOURCE_KEY"],
                                    os.environ["LOST_GALLERY_R2_HOST"], state_dir,
                                    os.environ["LOST_GALLERY_PHOTO_ROOT"])
             try:
                 refresh = GalleryRefresh(es, encoder, source, gallery_index(), state_dir,
-                                         interval=int(os.getenv("LOST_GALLERY_INTERVAL_SECONDS", "900")), ready=ready)
+                                         interval=int(os.getenv("LOST_GALLERY_INTERVAL_SECONDS", "900")), ready=ready,
+                                         **({"store": store} if store is not None else {}))
                 app.state.gallery_refresh = refresh
                 refresh.start()
             except BaseException:
@@ -92,6 +107,7 @@ async def lifespan(app):
 app = FastAPI(title="PawBridge Lost Animal Search", lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(router, prefix="/internal/animals")
+app.include_router(recommendation_router, prefix="/internal/animals")
 
 
 @app.get("/health")

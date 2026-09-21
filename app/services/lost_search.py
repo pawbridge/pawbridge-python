@@ -93,11 +93,17 @@ def rank_candidates(hits, lost_date=None, region=None, description=None, *, coat
 
 def search_photo(data, species, lost_date=None, region=None, description=None, include_adopted_or_returned=False):
     from app.services.dinov3 import get_encoder, gallery_index
-    from app.es.client import es
     color_weight = ranking_weight()
     with decode_photo(data) as image:
         embedding = get_encoder().encode_with_metadata(image, species)
     logging.getLogger(__name__).info("Lost-search image processing: %s", embedding.focus_status)
+    from app.services.lost_storage import backend, get_postgresql_store
+    if backend() == 'postgresql':
+        statuses = ACTIVE_STATUSES + (RESOLVED_STATUSES if include_adopted_or_returned else ())
+        hits = get_postgresql_store().search(gallery_index(), embedding, species, statuses, CANDIDATE_POOL)
+        return {"candidates": rank_candidates(hits, lost_date, region, description,
+                                              coat_color=embedding.coat_color, color_weight=color_weight)}
+    from app.es.client import es
     script = {"source": "cosineSimilarity(params.vector, 'image_vector') + 1.0",
               "params": {"vector": embedding.vector}}
     if embedding.animal_vector is not None:
