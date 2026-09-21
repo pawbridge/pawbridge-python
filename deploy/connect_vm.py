@@ -10,6 +10,16 @@ import subprocess
 import sys
 
 SOCKET_DIRECTORY = Path(".local/run/pawbridge-gpu")
+DATABASE_TARGETS = {
+    "mysql": ("mysql", 3306, 13306),
+    "postgresql": ("pawbridge-postgresql", 5432, 15432),
+}
+
+
+def database_target(backend: str) -> tuple[str, int, int]:
+    if backend not in DATABASE_TARGETS:
+        raise RuntimeError("Unknown VM database backend")
+    return DATABASE_TARGETS[backend]
 
 
 def prepare_socket(home: Path) -> Path:
@@ -69,14 +79,15 @@ def service_ip(namespace: str, name: str, port: int) -> str:
     return str(ip)
 
 
-def prepare_remote() -> dict:
+def prepare_remote(backend: str = "mysql") -> dict:
+    service, port, _ = database_target(backend)
     if os.getuid() != 1000 or Path.home() != Path("/home/vagrant"):
         raise RuntimeError("VM socket owner does not match proxy UID 1000")
     # Discover first: an unavailable cluster must not change the socket path.
     animal = service_ip("pawbridge", "animal-service", 8081)
-    mysql = service_ip("databases", "mysql", 3306)
+    database = service_ip("databases", service, port)
     path = prepare_socket(Path.home())
-    return {"animal": animal, "mysql": mysql, "socket": str(path)}
+    return {"animal": animal, backend: database, "socket": str(path)}
 
 
 def ssh_args(home: Path) -> list[str]:
@@ -91,40 +102,47 @@ def ssh_args(home: Path) -> list[str]:
     ]
 
 
-def forward_args(ssh: list[str], host: str, discovered: dict) -> list[str]:
+def forward_args(ssh: list[str], host: str, discovered: dict, backend: str = "mysql") -> list[str]:
+    _, remote_port, local_port = database_target(backend)
     animal = str(ipaddress.IPv4Address(discovered["animal"]))
-    mysql = str(ipaddress.IPv4Address(discovered["mysql"]))
-    if not all(ipaddress.ip_address(ip).is_private for ip in (animal, mysql)):
+    database = str(ipaddress.IPv4Address(discovered[backend]))
+    if not all(ipaddress.ip_address(ip).is_private for ip in (animal, database)):
         raise RuntimeError("Unexpected VM address")
     path = "/home/vagrant/.local/run/pawbridge-gpu/search.sock"
     if discovered["socket"] != path:
         raise RuntimeError("Unexpected VM socket path")
     return ssh + [
         "-N", "-L", "127.0.0.1:18082:" + animal + ":8081",
-        "-L", "127.0.0.1:13306:" + mysql + ":3306",
+        "-L", f"127.0.0.1:{local_port}:{database}:{remote_port}",
         "-R", "127.0.0.1:18091:127.0.0.1:18090",
         "-R", path + ":127.0.0.1:18090", host,
     ]
 
 
 def main() -> None:
-    if sys.argv[1:] == ["--prepare-remote"]:
+    arguments = sys.argv[1:]
+    if arguments == ["--prepare-remote"]:
         print(json.dumps(prepare_remote()))
+        return
+    if len(arguments) == 2 and arguments[0] == "--prepare-remote":
+        print(json.dumps(prepare_remote(arguments[1])))
         return
     if sys.argv[1:]:
         raise RuntimeError("Unexpected arguments")
+    backend = os.environ.get("PAWBRIDGE_DATABASE_BACKEND", "mysql")
+    database_target(backend)  # Validate before SSH or any remote socket changes.
     address = ipaddress.IPv4Address(os.environ.get("PAWBRIDGE_VM_ADDRESS", "192.168.57.11"))
     if not address.is_private:
         raise RuntimeError("VM address must be private IPv4")
     host = "vagrant@" + str(address)
     ssh = ssh_args(Path.home())
     prepared = subprocess.run(
-        ssh + [host, "python3 - --prepare-remote"],
+        ssh + [host, "python3 - --prepare-remote " + backend],
         input=Path(__file__).read_text(), capture_output=True, text=True, timeout=45,
         check=True,
     )
-    args = forward_args(ssh, host, json.loads(prepared.stdout))
-    print("Starting authenticated VM feed, preview DB and private GPU bridge", flush=True)
+    args = forward_args(ssh, host, json.loads(prepared.stdout), backend)
+    print(f"Starting authenticated VM feed, {backend} DB and private GPU bridge", flush=True)
     os.execv(args[0], args)
 
 

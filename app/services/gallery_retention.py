@@ -8,11 +8,12 @@ from app.services.lost_gallery import PREFIX, CONTRACT, FOCUS_VERSION, gallery_t
 
 
 class GalleryRetention:
-    def __init__(self, es, state_dir, alias):
+    def __init__(self, es, state_dir, alias, store=None):
         if not re.fullmatch(PREFIX + r'[a-z0-9][a-z0-9-]{0,60}', alias):
             raise ValueError('Invalid retention alias')
-        self.es = es.options(request_timeout=30, max_retries=0)
-        self.path = Path(state_dir) / (alias + '-retention.json')
+        self.store = store
+        self.es = es.options(request_timeout=30, max_retries=0) if store is None else None
+        self.path = Path(state_dir) / (alias + ('-postgresql' if store is not None else '') + '-retention.json')
         self.journal = {'known': [], 'published': []}
         if self.path.exists():
             if self.path.is_symlink() or self.path.stat().st_size > 16384:
@@ -33,7 +34,10 @@ class GalleryRetention:
         for name in list(self.journal['known']):
             if name in keep:
                 continue
-            if self.es.indices.exists(index=name):
+            if self.store is not None:
+                if not self.store.delete_unpublished(name):
+                    continue
+            elif self.es.indices.exists(index=name):
                 # Never delete an index in use by any alias, including another local gallery.
                 if self.es.indices.get_alias(index=name)[name].get('aliases'):
                     continue

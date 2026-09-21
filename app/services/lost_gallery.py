@@ -88,17 +88,17 @@ class GalleryBuildCancelled(RuntimeError):
     pass
 
 
-def build_gallery(es, encoder_factory, manifest_path, photo_root, alias, state_dir, progress=None, cancelled=None, photo_provider=None, stream=None):
+def build_gallery(es, encoder_factory, manifest_path, photo_root, alias, state_dir, progress=None, cancelled=None, photo_provider=None, stream=None, store=None):
     # One GPU host is supported. All publishers share this state directory.
     import fcntl
     state = Path(state_dir)
     state.mkdir(parents=True, exist_ok=True)
     with (state / "gallery-publisher.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _build_gallery(es, encoder_factory(), manifest_path, photo_root, alias, progress, cancelled, photo_provider, stream)
+        return _build_gallery(es, encoder_factory(), manifest_path, photo_root, alias, progress, cancelled, photo_provider, stream, store)
 
 
-def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None, cancelled=None, photo_provider=None, stream=None):
+def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None, cancelled=None, photo_provider=None, stream=None, store=None):
     def check_cancelled():
         if cancelled and cancelled():
             raise GalleryBuildCancelled("Gallery build stopped before publication")
@@ -115,33 +115,20 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         snapshot_hash = stream.checkpoint['descriptor']['snapshotSha256']
     root = Path(photo_root).resolve(strict=True)
     target = gallery_target(snapshot_hash)
-    client = es.options(request_timeout=30, max_retries=0)
-    if client.indices.exists_alias(name=alias):
-        previous = client.indices.get_alias(name=alias)
-        if len(previous) != 1:
-            raise RuntimeError("Gallery alias must resolve to exactly one index")
-        old_index = next(iter(previous))
-        old_mapping = client.indices.get_mapping(index=old_index)[old_index]["mappings"]
-        if (not old_index.startswith(PREFIX + "build-")
-                or old_mapping.get("_meta", {}).get("contract") != CONTRACT):
-            raise RuntimeError("Refusing to replace a gallery not owned by this builder")
-    else:
-        old_index = None
-        if client.indices.exists(index=alias):
-            raise RuntimeError("Gallery alias name is already a concrete index")
-    expected_meta = gallery_mapping(snapshot_hash)["_meta"]
-    if client.indices.exists(index=target):
-        actual = client.indices.get_mapping(index=target)[target]["mappings"]
-        if actual.get("_meta") != expected_meta:
-            raise RuntimeError("Existing staging index has a different contract")
-    else:
-        client.indices.create(index=target, settings={"number_of_shards": 1, "number_of_replicas": 0},
-                              mappings=gallery_mapping(snapshot_hash))
+    if store is None:
+        from app.services.es_gallery_store import ElasticsearchGalleryStore
+        store = ElasticsearchGalleryStore(es)
+    old_index = store.begin(alias, target, snapshot_hash, total)
     check_cancelled()
-    if old_index == target and client.count(index=target)["count"] == total:
+    if old_index == target and store.count(target) == total:
         return {"alias": alias, "index": target, "records": total, "encoded": 0,
                 "reused": total, "snapshot_sha256": snapshot_hash}
-    if stream is not None and stream.processed and client.count(index=target)["count"] < stream.processed:
+    if store.completed(target, total):
+        # A previously published immutable snapshot can become current again.
+        store.publish(alias, target, old_index, total, check_cancelled)
+        return {"alias": alias, "index": target, "records": total, "encoded": 0,
+                "reused": total, "snapshot_sha256": snapshot_hash}
+    if stream is not None and stream.processed and store.count(target) < stream.processed:
         # The staging index may have been removed after a prior process stopped.
         stream.reset_resume()
     processed = stream.processed if stream is not None else 0
@@ -153,14 +140,7 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         if not 1 <= len(batch) <= 100 or processed + len(batch) > total:
             raise ValueError("Gallery batch exceeds its declared bounds")
         ids = [str(row["id"]) for row in batch]
-        cache = {}
-        for source in dict.fromkeys(x for x in (old_index, target) if x):
-            response = client.mget(index=source, ids=ids)
-            for item in response["docs"]:
-                if "error" in item:
-                    raise RuntimeError("Gallery cache read failed")
-                if item.get("found"):
-                    cache[item["_source"]["id"]] = item["_source"]
+        cache = store.documents(old_index, target, ids)
         planned = []
         for row in batch:
             cached = cache.get(row["id"], {})
@@ -178,7 +158,7 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         downloads = (GalleryInputPrefetch(to_fetch, provider, root, check_cancelled)
                      if to_fetch else nullcontext())
         with downloads as prefetch:
-            operations = []
+            documents = []
             for row, cached, reuse_vector, needs_color in planned:
                 check_cancelled()
                 color = None
@@ -214,11 +194,9 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
                             **{field: row.get(field) for field in METADATA}}
                 if animal is not None:
                     document["animal_vector"] = animal
-                operations.extend([{"index": {"_index": target, "_id": str(row["id"])}}, document])
+                documents.append(document)
         check_cancelled()
-        response = client.bulk(operations=operations)
-        if response.get("errors"):
-            raise RuntimeError("Gallery bulk write failed; previous alias was preserved")
+        store.write_page(target, documents)
         processed += len(batch)
         if stream is not None:
             # Persist the cursor only after the complete page bulk was acknowledged.
@@ -230,23 +208,7 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
         raise RuntimeError("Gallery stream ended before the declared count")
     if stream is not None:
         stream.verify_complete()
-    client.indices.refresh(index=target)
-    count = client.count(index=target)["count"]
-    if count != total:
-        raise RuntimeError("Staging gallery count differs from the complete snapshot")
-    # Detect a concurrent publisher before constructing the atomic alias update.
-    current = list(client.indices.get_alias(name=alias)) if client.indices.exists_alias(name=alias) else []
-    if current != ([old_index] if old_index else []):
-        raise RuntimeError("Gallery alias changed during the build; retry explicitly")
-    check_cancelled()
-    if old_index != target:
-        actions = ([{"remove": {"index": old_index, "alias": alias, "must_exist": True}}] if old_index else [])
-        actions.append({"add": {"index": target, "alias": alias}})
-        response = client.indices.update_aliases(actions=actions)
-        if not response.get("acknowledged") or response.get("errors"):
-            raise RuntimeError("Gallery publish acknowledgment is uncertain")
-    if set(client.indices.get_alias(name=alias)) != {target}:
-        raise RuntimeError("Published gallery alias does not match the completed index")
+    count = store.publish(alias, target, old_index, total, check_cancelled)
     return {"alias": alias, "index": target, "records": count, "encoded": encoded,
             "reused": reused, "color_processed": color_processed, "color_available": color_available,
             "snapshot_sha256": snapshot_hash}

@@ -35,15 +35,16 @@ class BackgroundEncoder:
 
 
 class GalleryRefresh:
-    def __init__(self, es, encoder, source, alias, state_dir, interval=900, ready=True):
+    def __init__(self, es, encoder, source, alias, state_dir, interval=900, ready=True, store=None):
         if not 30 <= interval <= 86400:
             raise ValueError('Gallery interval must be between 30 seconds and one day')
         self.es, self.encoder, self.source, self.alias = es, BackgroundEncoder(encoder), source, alias
         self.state_dir, self.interval = Path(state_dir), interval
+        self.store = store
         self.stop = threading.Event()
         self.ready = ready
         self.status = {'state': 'waiting', 'lastSuccess': None}
-        self.retention = GalleryRetention(es, self.state_dir, alias)
+        self.retention = GalleryRetention(es, self.state_dir, alias, store=store)
         self.last_result = None
         self.etag = None  # Fetch afresh after every restart; never trust a stale local success flag.
         self.thread = threading.Thread(target=self.run, name='gallery-refresh', daemon=False)
@@ -51,6 +52,11 @@ class GalleryRefresh:
     def published(self):
         if not self.last_result:
             return False
+        if self.store is not None:
+            try:
+                return self.store.published(self.last_result)
+            except Exception:
+                return False
         client = self.es.options(request_timeout=10, max_retries=0)
         try:
             index = self.last_result['index']
@@ -82,7 +88,7 @@ class GalleryRefresh:
             raise ValueError('Source did not provide a complete snapshot')
         self.retention.prepare(snapshot['snapshot_sha256'])
         self.save_status(state='building')
-        arguments = {}
+        arguments = {"store": self.store} if self.store is not None else {}
         if snapshot.get('paged') is True:
             arguments['stream'] = snapshot['stream']
         result = build_gallery(self.es, lambda: self.encoder, snapshot.get('manifest_path'),

@@ -19,12 +19,16 @@ def main():
     from app.services.dinov3 import get_encoder, gallery_index, visual_profile
     if visual_profile() != "sam3-animal-focus":
         raise RuntimeError("Gallery builds require the SAM 3 profile")
-    from app.es.client import es
+    from app.services.lost_storage import storage_session
     from app.services.gallery_runtime import runtime_owner
-    with runtime_owner(args.state_dir):
+    with storage_session() as store, runtime_owner(args.state_dir):
+        if store is None:
+            from app.es.client import es
+        else:
+            es = None
         result = build_gallery(es, get_encoder, args.manifest, args.photo_root,
                                gallery_index(), args.state_dir,
-                               progress=lambda row: print(json.dumps(row), flush=True))
+                               progress=lambda row: print(json.dumps(row), flush=True), store=store)
     print(json.dumps(result), flush=True)
 
 
