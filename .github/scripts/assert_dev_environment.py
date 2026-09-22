@@ -8,7 +8,7 @@ import sys
 def verify(root, service):
     root = Path(root)
     contract = json.loads((root / 'environments/environment-contract.json').read_text())
-    if contract.get('version') != 1 or contract.get('namespace') != 'pawbridge-dev' or contract.get('branch') != 'dev':
+    if contract.get('version') != 2 or contract.get('runtime') != 'local-compose' or contract.get('composeProject') != 'pawbridge-dev' or contract.get('branch') != 'dev':
         raise ValueError('isolated dev contract is required before publishing an Infra PR')
     expected = 'environments/dev/isolated-values/' + service + '.yaml'
     if contract['services'][service]['devValues'] != expected:
