@@ -52,9 +52,11 @@ def write_report(output, dataset, evaluations, provenance, *, feature_root=None)
             chunks.append(f'<tr><td>{text(name)}</td><td>{rate["warm_images"]}</td><td>{number(rate["images_per_second"])}</td><td>{number(rate["images_per_minute"])}</td><td>{number(rate["median_seconds"])}</td><td>{number(rate["p95_seconds"])}</td></tr>')
         chunks.append('</table>')
     if not evaluations:
-        chunks.append('<h2>실제 모델 비교 대기</h2><p>아래는 확인한 입력 자료입니다. 아직 개선된 순위나 정확도 결과는 없습니다.</p><div class="grid">')
+        chunks.append('<h2>입력 사진 확인 · AI 비교 아직 미실행</h2><p>아래는 비교에 사용할 자료입니다. 기존 검색 후보의 나열 순서는 이번 실험 순위가 아닙니다. 아직 개선된 순위나 정확도 결과는 없습니다.</p><div class="grid">')
         for photo in dataset.photos:
-            chunks.append(f'<article class="card"><strong>{text(photo.id)}</strong><p>{text(photo.role)} · 정답 {text(photo.truth)}</p><img src="assets/{text(photo.id)}.png" loading="lazy" alt="평가 입력"></article>')
+            label = ('입력 사진 · '+photo.id if photo.role == 'query'
+                     else '기존 검색 후보 · 공고 ID '+str(photo.metadata['animal_id']))
+            chunks.append(f'<article class="card"><strong>{text(label)}</strong><p>동일 개체 정답: {text(photo.truth)} · 새 실험 순위 없음</p><img src="assets/{text(photo.id)}.png" loading="lazy" alt="평가 입력"></article>')
         chunks.append('</div>')
     for evaluation in evaluations:
         variant, ranking = evaluation['variant']['name'], evaluation['ranking']['name']
