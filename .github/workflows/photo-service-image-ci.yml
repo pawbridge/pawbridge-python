@@ -2,7 +2,7 @@ name: Photo Service Image CI
 
 on:
   pull_request:
-    branches: [dev]
+    branches: [dev, main]
     paths: &photo_paths
       - app/photo_main.py
       - app/photo_optimizer.py
