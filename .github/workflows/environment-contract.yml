@@ -12,4 +12,4 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - run: python3 -m unittest discover -s .github/scripts -p 'test_assert_dev_environment.py'
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*environment*.py'

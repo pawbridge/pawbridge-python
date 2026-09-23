@@ -187,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          branch="chore/python-ai-image-${GITHUB_SHA:0:12}"
+          branch="chore/python-ai-dev-image-${GITHUB_SHA:0:12}"
           title="chore: Python AI 이미지 digest 갱신"
           values_file="environments/dev/isolated-values/python-ai-service.yaml"
           checked_out_infra_sha="$(git rev-parse HEAD)"
@@ -391,13 +391,13 @@ jobs:
             --state open \
             --limit 100 \
             --json number,headRefName,headRefOid,headRepositoryOwner,isCrossRepository,body,isDraft \
-            --jq ".[] | select(.isCrossRepository == false) | select(.headRepositoryOwner.login == \"$infra_owner\") | select(.headRefName | test(\"^chore/python-ai-image-[0-9a-f]{12}$\")) | select((.body // \"\") | contains(\"<!-- pawbridge-automation: python-ai-image -->\")) | [.number, .headRefName, .headRefOid, .isDraft] | @tsv")"
+            --jq ".[] | select(.isCrossRepository == false) | select(.headRepositoryOwner.login == \"$infra_owner\") | select(.headRefName | test(\"^chore/python-ai-dev-image-[0-9a-f]{12}$\")) | select((.body // \"\") | contains(\"<!-- pawbridge-automation: python-ai-image -->\")) | [.number, .headRefName, .headRefOid, .isDraft] | @tsv")"
           while IFS=$'\t' read -r obsolete_number obsolete_branch obsolete_head_oid obsolete_is_draft; do
             if [ -z "$obsolete_number" ] || [ "$obsolete_branch" = "$branch" ]; then
               continue
             fi
 
-            obsolete_sha="${obsolete_branch#chore/python-ai-image-}"
+            obsolete_sha="${obsolete_branch#chore/python-ai-dev-image-}"
             comparison_status="$(GH_TOKEN="$PYTHON_GITHUB_TOKEN" gh api \
               "/repos/$GITHUB_REPOSITORY/compare/$obsolete_sha...$GITHUB_SHA" \
               --jq '.status')"
