@@ -1,0 +1,15 @@
+name: Environment destination contract
+on:
+  pull_request:
+    branches: [dev, main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_assert_dev_environment.py'

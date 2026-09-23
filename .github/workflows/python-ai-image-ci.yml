@@ -4,7 +4,10 @@ on:
   pull_request:
     branches:
       - dev
+      - main
     paths:
+      - ".github/scripts/assert_dev_environment.py"
+      - ".github/scripts/test_assert_dev_environment.py"
       - "app/**"
       - "tests/**"
       - "Dockerfile"
@@ -64,13 +67,13 @@ jobs:
         run: >-
           python -m unittest discover
           --start-directory .github/scripts
-          --pattern 'test_update_python_ai_image_values.py'
+          --pattern 'test_*.py'
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: dorosiya
@@ -82,14 +85,14 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
           tags: dorosiya/pawbridge-python-ai-service:sha-${{ github.sha }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=python-ai-image
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=python-ai-image' || '' }}
 
       - name: Verify published Python AI image digest
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         env:
           PYTHON_AI_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
@@ -102,13 +105,13 @@ jobs:
             "dorosiya/pawbridge-python-ai-service@$PYTHON_AI_IMAGE_DIGEST"
 
       - name: Set up Helm
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.21.4
 
       - name: Check out Infra repository
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: pawbridge/pawbridge-infra-k8s
@@ -117,20 +120,26 @@ jobs:
           path: infra
           fetch-depth: 0
 
+      - name: Require isolated dev destination
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        env:
+          TARGET_SERVICE: python-ai-service
+        run: python3 .github/scripts/assert_dev_environment.py infra "$TARGET_SERVICE"
+
       - name: Update Python AI image reference
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         env:
           PYTHON_AI_IMAGE_TAG: sha-${{ github.sha }}
           PYTHON_AI_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: >-
           python .github/scripts/update_python_ai_image_values.py
-          infra/environments/dev/values/python-ai-service.yaml
+          infra/environments/dev/isolated-values/python-ai-service.yaml
           --repository dorosiya/pawbridge-python-ai-service
           --tag "$PYTHON_AI_IMAGE_TAG"
           --digest "$PYTHON_AI_IMAGE_DIGEST"
 
       - name: Validate Python AI image Helm override
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         working-directory: ${{ github.workspace }}/infra
         env:
           PYTHON_AI_IMAGE_REPOSITORY: dorosiya/pawbridge-python-ai-service
@@ -139,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          values_file="environments/dev/values/python-ai-service.yaml"
+          values_file="environments/dev/isolated-values/python-ai-service.yaml"
           first_hash="$(git hash-object "$values_file")"
           python "$GITHUB_WORKSPACE/.github/scripts/update_python_ai_image_values.py" \
             "$values_file" \
@@ -166,7 +175,7 @@ jobs:
           fi
 
       - name: Create or recover Infra draft pull request
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         working-directory: ${{ github.workspace }}/infra
         env:
           GH_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
@@ -180,7 +189,7 @@ jobs:
 
           branch="chore/python-ai-image-${GITHUB_SHA:0:12}"
           title="chore: Python AI 이미지 digest 갱신"
-          values_file="environments/dev/values/python-ai-service.yaml"
+          values_file="environments/dev/isolated-values/python-ai-service.yaml"
           checked_out_infra_sha="$(git rev-parse HEAD)"
           infra_owner="${INFRA_REPOSITORY%%/*}"
 
