@@ -42,6 +42,19 @@ def synthetic_descriptor(points):
 
 
 class CoatColorTest(unittest.TestCase):
+    def test_nearly_identical_neutral_colors_do_not_receive_maximum_penalty(self):
+        gray = descriptor((128, 128, 128))
+        for neighbor in ((128, 129, 128), (128, 128, 129), (129, 128, 128)):
+            with self.subTest(neighbor=neighbor):
+                self.assertLess(mismatch(gray, descriptor(neighbor)), .01)
+
+    def test_wrapped_chroma_v2_descriptor_is_not_compared_with_corrected_colors(self):
+        corrected = descriptor("gray")
+        previous = dict(corrected, version="foreground-lab32-joint8-v2")
+        self.assertFalse(valid(previous))
+        self.assertIsNone(mismatch(corrected, previous))
+        self.assertIsNone(mismatch(previous, corrected))
+
     def test_background_and_small_boundary_changes_do_not_change_foreground(self):
         first, mask = swatch((110, 70, 35), "blue")
         second, _ = swatch((110, 70, 35), "green")

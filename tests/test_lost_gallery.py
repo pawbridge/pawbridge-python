@@ -117,8 +117,10 @@ class LostGalleryTest(unittest.TestCase):
             image.save(buffer, format="PNG")
         data = buffer.getvalue(); sha = hashlib.sha256(data).hexdigest()
         vector = [1.] + [0.] * 1023
-        for failure in (False, True):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+        previous_version = "foreground-lab32-joint8-v2"
+        for old_version, failure in ((None, False), (None, True),
+                                     (previous_version, False), (previous_version, True)):
+            with self.subTest(old_version=old_version, failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 rows = [dict(id=i, species="DOG", source_sha256=sha, status="PROTECT") for i in (1, 2)]
                 manifest = root / "manifest.json"
@@ -132,10 +134,16 @@ class LostGalleryTest(unittest.TestCase):
                 es.indices.exists.return_value = False
                 es.indices.get_alias.side_effect = lambda **_: {active[0]: {}}
                 old_mapping = gallery_mapping("a" * 64)
-                old_mapping["_meta"].pop("coat_color_version")
+                if old_version is None:
+                    old_mapping["_meta"].pop("coat_color_version")
+                else:
+                    old_mapping["_meta"]["coat_color_version"] = old_version
                 es.indices.get_mapping.return_value = {old: {"mappings": old_mapping}}
                 cached = [dict(row, model_version=FOCUS_VERSION, image_vector=vector,
                                animal_vector=vector, focus_status="original_multiple_animals") for row in rows]
+                if old_version is not None:
+                    cached[0].update(coat_color_version=old_version,
+                                     coat_color=dict(color, version=old_version))
                 cached[1].update(coat_color_version=VERSION, coat_color=color)
                 es.mget.side_effect = lambda index, ids: {"docs": [dict(found=True, _source=r) for r in cached]} if index == old else {"docs": []}
                 es.bulk.return_value = {"errors": False}; es.count.return_value = {"count": 2}
@@ -167,6 +175,13 @@ class LostGalleryTest(unittest.TestCase):
         digest = "a" * 64
         legacy = "animals-lost-dinov3-sam3-build-" + hashlib.sha256((FOCUS_VERSION + digest).encode()).hexdigest()[:24]
         self.assertNotEqual(gallery_target(digest), legacy)
+
+    def test_corrected_color_version_does_not_overwrite_previous_gallery_target(self):
+        from app.services.lost_gallery import gallery_target, METADATA_VERSION
+        digest = "c" * 64
+        previous = "animals-lost-dinov3-sam3-build-" + hashlib.sha256(
+            (FOCUS_VERSION + "foreground-lab32-joint8-v2" + METADATA_VERSION + digest).encode()).hexdigest()[:24]
+        self.assertNotEqual(gallery_target(digest), previous)
 
     def test_status_is_indexed_and_metadata_contract_changes_the_target(self):
         from app.services.coat_color import VERSION as COLOR_VERSION
