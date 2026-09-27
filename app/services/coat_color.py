@@ -4,7 +4,7 @@ from itertools import product
 import math
 import os
 
-VERSION = "foreground-lab32-joint8-v2"
+VERSION = "foreground-lab32-joint8-v3"
 MARGINAL_BINS = 32
 JOINT_BINS = 8
 JOINT_TOLERANCE = .08
@@ -41,7 +41,15 @@ def describe(image, foreground, *, source="single_mask"):
     pixels = np.asarray(image).reshape(-1, 3)[selected]
     with Image.fromarray(pixels.reshape(1, -1, 3), "RGB") as sample:
         with ImageCms.applyTransform(sample, _transform()) as converted:
-            lab = np.asarray(converted).reshape(-1, 3).astype("float64")
+            # LAB raw array export wraps negative a/b values around zero.
+            # Read individual bands to keep neutral chroma centered at 128.
+            bands = converted.split()
+            try:
+                lab = np.stack([np.asarray(band) for band in bands], axis=-1)
+                lab = lab.reshape(-1, 3).astype("float64")
+            finally:
+                for band in bands:
+                    band.close()
     # Soft bins avoid a sudden mismatch across an arbitrary histogram boundary.
     coordinates = lab / 255 * (MARGINAL_BINS - 1)
     lower = coordinates.astype(int)

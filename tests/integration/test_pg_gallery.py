@@ -250,6 +250,145 @@ class PostgresqlGalleryTest(unittest.TestCase):
             self.assertEqual(stream.acknowledged,[1]);self.assertTrue(stream.verified)
             self.assertTrue(self.store.published(result));self.assertEqual(result['reused'],1)
 
+    def test_color_v3_refresh_reuses_vectors_resumes_and_can_restore_v2(self):
+        from unittest.mock import patch
+        import numpy as np
+        from app.services.coat_color import describe, valid
+        from app.lost_main import ColorGalleryRefreshRequired
+
+        old_version = 'foreground-lab32-joint8-v2'
+        snapshot = 'd' * 64
+        with Image.new('RGB', (32, 32), (128, 129, 128)) as image:
+            buffer = io.BytesIO()
+            image.save(buffer, format='PNG')
+            payload = buffer.getvalue()
+            corrected = describe(image, np.ones((32, 32), dtype=bool))
+        digest = hashlib.sha256(payload).hexdigest()
+        rows = [dict(id=i, species='DOG', status='PROTECT', source_sha256=digest) for i in (1, 2, 3)]
+        legacy = [dict(document(i, animal_vector=VECTOR), source_sha256=digest,
+                       focus_status='animal_mask', coat_color_version=old_version,
+                       coat_color=dict(corrected, version=old_version)) for i in (1, 2, 3)]
+        # A previous no-mask result remains null and requires no extra inference.
+        legacy[-1].update(focus_status='original_no_confident_animal', coat_color=None)
+        legacy[-1].pop('animal_vector')
+        with patch('app.services.coat_color.VERSION', old_version), \
+                patch('app.services.lost_gallery.COLOR_VERSION', old_version):
+            old_target = self.publish('d', legacy)
+        old_hits = self.search(VECTOR)
+        self.store.validate(ALIAS, FOCUS_VERSION)  # Color weight zero can serve the old generation.
+        with self.assertRaises(ColorGalleryRefreshRequired):
+            self.store.validate(ALIAS, FOCUS_VERSION, COLOR_VERSION)
+
+        class Stream:
+            total = 3
+            processed = 0
+            checkpoint = {'descriptor': {'snapshotSha256': snapshot}}
+            verified = False
+            def pages(inner, cancelled):
+                for row in rows[inner.processed:]:
+                    yield [row]
+            def acknowledge(inner, count):
+                inner.processed = count
+            def verify_complete(inner):
+                inner.verified = True
+
+        calls = []
+        class Encoder:
+            model_version = FOCUS_VERSION
+            def encode_with_metadata(inner, *args, **kwargs):
+                raise AssertionError('Unchanged DINO vectors must not be recomputed')
+            def describe_coat_color(inner, image, species, **kwargs):
+                self.assertEqual(self.pool.get_stats()['pool_available'], 1)
+                calls.append(species)
+                if len(calls) == 2:
+                    raise RuntimeError('Injected second-photo failure')
+                return describe(image, np.ones((image.height, image.width), dtype=bool))
+
+        stream = Stream()
+        downloads = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            photo = root / 'photo.png'
+            photo.write_bytes(payload)
+            @contextmanager
+            def provider(row):
+                downloads.append(row['id'])
+                yield photo
+            def run():
+                return build_gallery(None, Encoder, None, root, ALIAS, root,
+                                     stream=stream, photo_provider=provider, store=self.store)
+            with self.assertRaisesRegex(RuntimeError, 'Injected second-photo failure'):
+                run()
+            target = gallery_target(snapshot)
+            self.assertNotEqual(target, old_target)
+            self.assertEqual(stream.processed, 1)
+            self.assertEqual(self.store.count(target), 1)
+            self.assertFalse(stream.verified)
+            self.assertFalse(self.store.completed(target, 3))
+            self.assertEqual(self.search(VECTOR), old_hits)
+            self.store.validate(ALIAS, FOCUS_VERSION, old_version)
+            result = run()
+
+        self.assertTrue(stream.verified)
+        self.assertEqual(result['encoded'], 0)
+        self.assertEqual(result['reused'], 3)
+        self.assertEqual(downloads, [1, 2, 2])  # Completed row 1 is not fetched again; row 3 has no mask.
+        self.assertTrue(self.store.published(result))
+        self.store.validate(ALIAS, FOCUS_VERSION, COLOR_VERSION)
+        with self.store.connection() as conn:
+            vectors = conn.execute(
+                'SELECT animal_id,image_vector::text,animal_vector::text '
+                'FROM lost_gallery_documents WHERE build_key=%s ORDER BY animal_id', (old_target,)).fetchall()
+            self.assertEqual(vectors, conn.execute(
+                'SELECT animal_id,image_vector::text,animal_vector::text '
+                'FROM lost_gallery_documents WHERE build_key=%s ORDER BY animal_id', (target,)).fetchall())
+        new_hits = self.search(VECTOR)
+        self.assertEqual([(h['_source']['id'], h['_score']) for h in new_hits],
+                         [(h['_source']['id'], h['_score']) for h in old_hits])
+        for hit in new_hits:
+            self.assertEqual(hit['_source']['coat_color_version'], COLOR_VERSION)
+            color = hit['_source']['coat_color']
+            self.assertEqual(color is None, hit['_source']['id'] == 3)
+            if color is not None:
+                self.assertTrue(valid(color))
+                self.assertEqual(color, corrected)
+
+        # Rollback switches only the head; neither generation is deleted or rewritten.
+        self.store.publish(ALIAS, old_target, target, 3, lambda: None)
+        self.store.validate(ALIAS, FOCUS_VERSION, old_version)
+        self.assertEqual(self.search(VECTOR), old_hits)
+        self.assertEqual(self.store.count(target), 3)
+        with self.assertRaises(ColorGalleryRefreshRequired):
+            self.store.validate(ALIAS, FOCUS_VERSION, COLOR_VERSION)
+
+    def test_color_rollback_reference_survives_two_new_publications_and_retention(self):
+        from unittest.mock import patch
+        from app.services.gallery_retention import GalleryRetention
+        old_version = 'foreground-lab32-joint8-v2'
+        rollback_alias = 'animals-lost-dinov3-sam3-color-v2-rollback'
+        with patch('app.services.lost_gallery.COLOR_VERSION', old_version):
+            old = self.publish('a', [dict(document(1), coat_color_version=old_version)])
+        with self.store.connection() as conn:
+            conn.execute('INSERT INTO lost_gallery_heads(alias,build_key) VALUES (%s,%s)', (rollback_alias, old))
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('app.services.lost_gallery.COLOR_VERSION', old_version):
+                retention = GalleryRetention(None, directory, ALIAS, store=self.store)
+                retention.prepare('a' * 64)
+                retention.published(old)
+            for char, animal_id in [('b', 2), ('c', 3)]:
+                retention.prepare(char * 64)
+                current = self.publish(char, [document(animal_id)])
+                retention.published(current)
+            restarted = GalleryRetention(None, directory, ALIAS, store=self.store)
+            restarted.prune(set(restarted.journal['published']))
+        self.assertNotIn(old, restarted.journal['published'])
+        self.assertFalse(self.store.delete_unpublished(old))
+        self.assertEqual(self.store.count(old), 1)
+        self.store.validate(rollback_alias, FOCUS_VERSION, old_version)
+        self.assertEqual([h['_source']['id'] for h in self.search()], [3])
+        self.store.publish(ALIAS, old, current, 1, lambda: None)
+        self.assertEqual([h['_source']['id'] for h in self.search()], [1])
+
     def seed_recommendation_animals(self, statuses):
         with self.store.connection() as conn:
             conn.execute("INSERT INTO shelters(id,created_at,care_reg_no,name) VALUES (900001,now(),'recommendation-fixture','test') ON CONFLICT(id) DO NOTHING")
