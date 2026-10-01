@@ -193,6 +193,117 @@ class PostgresqlGalleryTest(unittest.TestCase):
         self.assertEqual(self.store.count(first),0)
         self.assertFalse(self.store.delete_unpublished(second))
 
+    def test_retention_bulk_cleanup_uses_bounded_committed_transactions(self):
+        retired=self.publish('a',[document(i) for i in range(1,1202)])
+        active=self.publish('b',[document(2001)])
+        with self.store.connection() as conn:
+            conn.execute('CREATE TEMP TABLE retention_deleted_rows (transaction_id bigint)')
+            conn.execute('CREATE FUNCTION pg_temp.audit_retention_delete() RETURNS trigger LANGUAGE plpgsql AS $$ '
+                         'BEGIN INSERT INTO retention_deleted_rows VALUES (txid_current()); RETURN OLD; END $$')
+            conn.execute('CREATE TRIGGER retention_audit AFTER DELETE ON lost_gallery_documents '
+                         'FOR EACH ROW EXECUTE FUNCTION pg_temp.audit_retention_delete()')
+        try:
+            self.assertTrue(self.store.delete_unpublished(retired))
+            with self.store.connection() as conn:
+                sizes=[r[0] for r in conn.execute('SELECT count(*) FROM retention_deleted_rows GROUP BY transaction_id').fetchall()]
+            self.assertEqual(sum(sizes),1201)
+            self.assertGreater(len(sizes),1)
+            self.assertLessEqual(max(sizes),500)
+            self.assertEqual(self.store.count(active),1)
+            self.assertEqual([h['_source']['id'] for h in self.search()],[2001])
+        finally:
+            with self.store.connection() as conn:
+                conn.execute('DROP TRIGGER retention_audit ON lost_gallery_documents')
+                conn.execute('DROP TABLE retention_deleted_rows')
+
+    def test_retention_sql_failure_keeps_committed_progress_and_can_resume(self):
+        retired=self.publish('a',[document(i) for i in range(1,1102)])
+        self.publish('b',[document(2001)])
+        with self.store.connection() as conn:
+            conn.execute("CREATE FUNCTION pg_temp.fail_retention_row() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                         "BEGIN IF OLD.animal_id=501 THEN RAISE EXCEPTION 'controlled cleanup failure'; END IF; RETURN OLD; END $$")
+            conn.execute('CREATE TRIGGER retention_failure BEFORE DELETE ON lost_gallery_documents '
+                         'FOR EACH ROW EXECUTE FUNCTION pg_temp.fail_retention_row()')
+        try:
+            with self.assertRaisesRegex(Exception,'controlled cleanup failure'):
+                self.store.delete_unpublished(retired)
+            self.assertEqual(self.store.count(retired),601)
+            self.assertEqual([h['_source']['id'] for h in self.search()],[2001])
+            self.assertFalse(self.store.completed(retired,1101))
+        finally:
+            with self.store.connection() as conn:
+                conn.execute('DROP TRIGGER retention_failure ON lost_gallery_documents')
+        self.assertTrue(self.store.delete_unpublished(retired))
+        self.assertEqual(self.store.count(retired),0)
+        self.assertTrue(self.store.delete_unpublished(retired))
+
+    def test_retention_cancellation_between_pages_preserves_search_and_resumes(self):
+        retired=self.publish('a',[document(i) for i in range(1,1102)])
+        self.publish('b',[document(2001)])
+        checks=[]
+        def cancel_after_first_page():
+            checks.append(True)
+            if len(checks)>1: raise GalleryBuildCancelled('controlled stop')
+        with self.assertRaises(GalleryBuildCancelled):
+            self.store.delete_unpublished(retired,check_cancelled=cancel_after_first_page)
+        self.assertEqual(self.store.count(retired),601)
+        self.assertEqual([h['_source']['id'] for h in self.search()],[2001])
+        self.assertTrue(self.store.delete_unpublished(retired))
+
+    def test_retention_rechecks_new_alias_references_between_pages(self):
+        retired=self.publish('a',[document(i) for i in range(1,1102)])
+        self.publish('b',[document(2001)])
+        calls=[]
+        def attach_protected_reference():
+            calls.append(True)
+            if len(calls)==2:
+                with self.store.connection() as conn:
+                    conn.execute('INSERT INTO lost_gallery_heads(alias,build_key) VALUES (%s,%s)',
+                                 (ALIAS+'-reserved',retired))
+        self.assertFalse(self.store.delete_unpublished(retired,check_cancelled=attach_protected_reference))
+        self.assertEqual(self.store.count(retired),601)
+        self.assertEqual([h['_source']['id'] for h in self.search()],[2001])
+
+    def test_retention_preserves_rollback_alias_and_rejects_foreign_metadata(self):
+        retired=self.publish('a',[document(i) for i in range(1,602)])
+        self.publish('b',[document(2001)])
+        other,_=self.begin('c');self.store.write_page(other,[document(3001)])
+        with self.store.connection() as conn:
+            conn.execute('INSERT INTO lost_gallery_heads(alias,build_key) VALUES (%s,%s)',(ALIAS+'-rollback',retired))
+            conn.execute("UPDATE lost_gallery_builds SET metadata=metadata||'{\"contract\":\"foreign\"}'::jsonb WHERE build_key=%s",(other,))
+        self.assertFalse(self.store.delete_unpublished(retired))
+        self.assertEqual(self.store.count(retired),601)
+        with self.assertRaisesRegex(RuntimeError,'unowned'):
+            self.store.delete_unpublished(other)
+        self.assertEqual(self.store.count(other),1)
+
+    def test_retention_slow_delete_respects_each_statement_timeout(self):
+        from unittest.mock import patch
+        retired=self.publish('a',[document(i) for i in range(1,1102)])
+        self.publish('b',[document(2001)])
+        with self.store.connection() as conn:
+            conn.execute('CREATE FUNCTION pg_temp.slow_retention_row() RETURNS trigger LANGUAGE plpgsql AS $$ '
+                         'BEGIN PERFORM pg_sleep(0.002); RETURN OLD; END $$')
+            conn.execute('CREATE TRIGGER retention_slow BEFORE DELETE ON lost_gallery_documents '
+                         'FOR EACH ROW EXECUTE FUNCTION pg_temp.slow_retention_row()')
+        original=self.store.connection
+        @contextmanager
+        def short_timeout(**kwargs):
+            with original(**kwargs) as conn:
+                conn.execute("SET LOCAL statement_timeout = '1800ms'")
+                yield conn
+        try:
+            # Controlled row delay makes one cascade exceed this test-only budget.
+            # Production keeps the existing 10-second statement timeout.
+            with patch.object(self.store,'connection',short_timeout):
+                self.assertTrue(self.store.delete_unpublished(retired))
+            self.assertEqual(self.store.count(retired),0)
+            self.assertEqual([h['_source']['id'] for h in self.search()],[2001])
+        finally:
+            with self.store.connection() as conn:
+                conn.execute('DROP TRIGGER retention_slow ON lost_gallery_documents')
+
+
     def test_builder_releases_pool_during_download_inference_and_reuses_features(self):
         image=io.BytesIO()
         Image.new('RGB',(8,8),'white').save(image,format='PNG')
@@ -220,6 +331,114 @@ class PostgresqlGalleryTest(unittest.TestCase):
             result=build_gallery(None,lambda:encoder,manifest,root,ALIAS,root,photo_provider=provider,store=self.store)
             self.assertEqual(result['encoded'],0);self.assertEqual(result['reused'],2)
             self.assertEqual(encoder.calls,2);self.assertTrue(self.store.published(result))
+
+    def test_incremental_builder_adds_one_animal_without_copying_unchanged_rows(self):
+        from app.services.gallery_retention import GalleryRetention
+        payload=io.BytesIO()
+        with Image.new('RGB',(8,8),'white') as image: image.save(payload,format='PNG')
+        data=payload.getvalue(); digest=hashlib.sha256(data).hexdigest()
+        calls=[]
+        class Encoder:
+            model_version=FOCUS_VERSION
+            def encode_with_metadata(inner,*args,**kwargs):
+                self.assertEqual(self.pool.get_stats()['pool_available'],1)
+                calls.append('encode')
+                return SimpleNamespace(model_version=FOCUS_VERSION,vector=VECTOR,animal_vector=None,
+                                       focus_status='original_no_confident_animal',coat_color=None)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); photo=root/'photo.png'; photo.write_bytes(data)
+            manifest=root/'manifest.json'
+            rows=[dict(id=i,species='DOG',status='PROTECT',source_sha256=digest) for i in (1,2)]
+            keeper=GalleryRetention(None,root,ALIAS,store=self.store)
+            @contextmanager
+            def provider(row): yield photo
+            def run():
+                manifest.write_text(json.dumps({'complete':True,'records':rows}))
+                return build_gallery(None,Encoder,manifest,root,ALIAS,root,photo_provider=provider,
+                                     store=self.store,incremental=True,prepare=keeper.prepare_target)
+            first=run(); keeper.published(first['index'])
+            with self.store.connection() as conn:
+                before=conn.execute('SELECT animal_id,xmin::text,ctid::text FROM lost_gallery_documents '
+                                    'WHERE build_key=%s ORDER BY animal_id',(first['index'],)).fetchall()
+            rows.append(dict(id=3,species='DOG',status='PROTECT',source_sha256=digest))
+            second=run(); keeper.published(second['index'])
+            self.assertEqual(second['index'],first['index'])
+            self.assertEqual((second['encoded'],second['staged'],second['inserted'],second['updated']),(1,1,1,0))
+            self.assertTrue(self.store.published(second))
+            with self.store.connection() as conn:
+                after=conn.execute('SELECT animal_id,xmin::text,ctid::text FROM lost_gallery_documents '
+                                   'WHERE build_key=%s AND animal_id IN (1,2) ORDER BY animal_id',(first['index'],)).fetchall()
+                self.assertEqual(conn.execute('SELECT count(*) FROM lost_gallery_builds').fetchone(),(1,))
+            self.assertEqual(before,after)
+            self.assertEqual(keeper.journal,{'known':[first['index']],'published':[first['index']]})
+            rows.pop()  # Returning to an earlier source hash still uses the stable active key safely.
+            third=run(); keeper.published(third['index'])
+            self.assertEqual((third['index'],third['encoded'],third['removed']),(first['index'],0,1))
+            self.assertTrue(self.store.published(third)); self.assertEqual(len(calls),3)
+
+    def test_incremental_restart_replays_metadata_without_repeating_staged_photo_inference(self):
+        payload=io.BytesIO()
+        with Image.new('RGB',(8,8),'white') as image: image.save(payload,format='PNG')
+        data=payload.getvalue(); digest=hashlib.sha256(data).hexdigest()
+        rows=[dict(id=i,species='DOG',status='PROTECT',source_sha256=digest) for i in range(1,5)]
+        calls=[]; downloads=[]
+        class Encoder:
+            model_version=FOCUS_VERSION
+            fail=False
+            def encode_with_metadata(inner,*args,**kwargs):
+                self.assertEqual(self.pool.get_stats()['pool_available'],1)
+                calls.append('encode')
+                if inner.fail and len(calls)==4: raise RuntimeError('Last new photo failed')
+                return SimpleNamespace(model_version=FOCUS_VERSION,vector=VECTOR,animal_vector=None,
+                                       focus_status='original_no_confident_animal',coat_color=None)
+        encoder=Encoder()
+        class Stream:
+            total=4; processed=0; resets=0; verified=False
+            checkpoint={'descriptor':{'snapshotSha256':'d'*64}}
+            def pages(inner,cancelled):
+                for row in rows[inner.processed:]: yield [row]
+            def acknowledge(inner,count): inner.processed=count
+            def reset_resume(inner): inner.processed=0; inner.resets+=1
+            def verify_complete(inner): inner.verified=True
+        stream=Stream()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); photo=root/'photo.png'; photo.write_bytes(data)
+            manifest=root/'manifest.json';manifest.write_text(json.dumps({'complete':True,'records':rows[:2]}))
+            @contextmanager
+            def provider(row): downloads.append(row['id']); yield photo
+            original=build_gallery(None,lambda:encoder,manifest,root,ALIAS,root,store=self.store,photo_provider=provider)
+            downloads.clear(); encoder.fail=True
+            def run():
+                return build_gallery(None,lambda:encoder,None,root,ALIAS,root,store=self.store,
+                                     stream=stream,incremental=True,photo_provider=provider)
+            with self.assertRaisesRegex(RuntimeError,'Last new photo failed'): run()
+            self.assertEqual(stream.processed,3)
+            self.assertTrue(self.store.published(original))
+            self.assertEqual([hit['_source']['id'] for hit in self.search()],[1,2])
+            result=run()
+            self.assertEqual(stream.resets,1); self.assertTrue(stream.verified)
+            self.assertEqual(downloads,[3,4,4]); self.assertEqual(len(calls),5)
+            self.assertEqual(result['encoded'],1); self.assertEqual(result['inserted'],2)
+            self.assertTrue(self.store.published(result))
+
+    def test_incremental_final_fingerprint_failure_keeps_published_search_unchanged(self):
+        original=self.publish('a',[document(1)])
+        rows=[document(1),document(2)]
+        # Pre-populate the second animal's reusable features in a delta to avoid GPU fixtures.
+        session,target=self.store.refresh_store(ALIAS,gallery_target('b'*64),'b'*64,2)
+        session.begin(ALIAS,target,'b'*64,2)
+        self.store.write_page(target,[document(2)])
+        class Stream:
+            total=2; processed=0
+            checkpoint={'descriptor':{'snapshotSha256':'b'*64}}
+            def pages(inner,cancelled): yield rows
+            def acknowledge(inner,count): inner.processed=count
+            def verify_complete(inner): raise ValueError('Complete snapshot fingerprint differs')
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError,'fingerprint'):
+            build_gallery(None,lambda:SimpleNamespace(model_version=FOCUS_VERSION),None,directory,ALIAS,directory,
+                          store=self.store,incremental=True,stream=Stream())
+        self.assertEqual([hit['_source']['id'] for hit in self.search()],[1])
+        self.assertEqual(self.store.count(original),1)
 
     def test_page_cursor_is_not_advanced_when_commit_acknowledgment_fails(self):
         row=document(1)

@@ -1,5 +1,6 @@
 """Bounded PostgreSQL gallery I/O. Connections are scoped to each short DB operation."""
 import json
+import hashlib
 import re
 from contextlib import contextmanager
 from app.services.dinov3 import validate_vector
@@ -48,6 +49,42 @@ class PostgresqlGalleryStore:
                 if not previous or previous[0].get('contract') != CONTRACT or not previous[1]:
                     raise RuntimeError('Refusing to replace an unowned or incomplete gallery')
             return old
+
+    def refresh_store(self, alias, target, snapshot_hash, total):
+        """Daily compatible refreshes stage only a delta; feature changes stage a full build."""
+        self.names(alias, target)
+        expected = gallery_mapping(snapshot_hash)['_meta']
+        with self.connection() as conn:
+            row = conn.execute('SELECT h.build_key,b.metadata,b.expected_count,b.completed,'
+                '(SELECT count(*) FROM lost_gallery_heads other WHERE other.build_key=h.build_key) '
+                'FROM lost_gallery_heads h JOIN lost_gallery_builds b ON b.build_key=h.build_key '
+                'WHERE h.alias=%s', (alias,)).fetchone()
+        if (row and row[3] and row[4] == 1
+                and {k:v for k,v in row[1].items() if k != 'snapshot_sha256'}
+                == {k:v for k,v in expected.items() if k != 'snapshot_sha256'}):
+            from app.services.pg_gallery_incremental import IncrementalGallerySession
+            session = IncrementalGallerySession(self, alias, row[0], row[1], row[2], snapshot_hash, total)
+            return session, session.delta_target
+        return self, self.build_target(target, snapshot_hash, total)
+
+    def build_target(self, target, snapshot_hash, total):
+        """An active key may now hold a later daily snapshot; never overwrite its owner."""
+        expected = (gallery_mapping(snapshot_hash)['_meta'], total)
+        with self.connection() as conn:
+            for attempt in range(10):
+                candidate = target if attempt == 0 else PREFIX + 'build-' + hashlib.sha256(
+                    ('full:' + target + snapshot_hash + str(total) + ':' + str(attempt)).encode()).hexdigest()[:24]
+                stored = conn.execute('SELECT metadata,expected_count FROM lost_gallery_builds '
+                                      'WHERE build_key=%s', (candidate,)).fetchone()
+                if stored is None or stored == expected:
+                    return candidate
+                if stored[0].get('contract') != CONTRACT:
+                    raise RuntimeError('Refusing a staging identity with a different owner')
+        raise RuntimeError('Gallery staging identities are exhausted')
+
+    @staticmethod
+    def result_index(target):
+        return target
 
     def completed(self, target, total):
         with self.connection() as conn:
@@ -213,17 +250,29 @@ class PostgresqlGalleryStore:
                 (ANIMAL_REGION_WEIGHT, ANIMAL_REGION_WEIGHT, build, animal_id, model_version, species, species)).fetchall()
         return source[0], [{'_source': row[0], '_score': row[1]} for row in rows]
 
-    def delete_unpublished(self, target):
-        # Retention calls only for journal-owned generations. Lock matches publication order.
-        with self.connection() as conn:
-            conn.execute('LOCK TABLE lost_gallery_heads IN SHARE ROW EXCLUSIVE MODE')
-            row = conn.execute('SELECT metadata FROM lost_gallery_builds WHERE build_key=%s FOR UPDATE', (target,)).fetchone()
-            if not row:
-                return True
-            from app.services.sam3_focus import FOCUS_VERSION
-            if row[0].get('contract') != CONTRACT or row[0].get('model_version') != FOCUS_VERSION:
-                raise RuntimeError('Refusing to delete an unowned gallery')
-            if conn.execute('SELECT 1 FROM lost_gallery_heads WHERE build_key=%s', (target,)).fetchone():
-                return False
-            conn.execute('DELETE FROM lost_gallery_builds WHERE build_key=%s', (target,))
-            return True
+    def delete_unpublished(self, target, *, check_cancelled=None):
+        # Retention passes only journal-owned generations. Commit each page so a
+        # later timeout or shutdown keeps progress and releases the pool/locks.
+        while True:
+            if check_cancelled is not None:
+                check_cancelled()
+            with self.connection() as conn:
+                conn.execute('LOCK TABLE lost_gallery_heads IN EXCLUSIVE MODE')
+                row = conn.execute('SELECT metadata FROM lost_gallery_builds WHERE build_key=%s FOR UPDATE', (target,)).fetchone()
+                if not row:
+                    return True
+                from app.services.sam3_focus import FOCUS_VERSION
+                if row[0].get('contract') != CONTRACT or row[0].get('model_version') != FOCUS_VERSION:
+                    raise RuntimeError('Refusing to delete an unowned gallery')
+                # Recheck all aliases while publication is excluded for this page.
+                if conn.execute('SELECT 1 FROM lost_gallery_heads WHERE build_key=%s', (target,)).fetchone():
+                    return False
+                conn.execute('UPDATE lost_gallery_builds SET completed=false WHERE build_key=%s AND completed', (target,))
+                deleted = conn.execute(
+                    'WITH page AS (SELECT animal_id FROM lost_gallery_documents '
+                    'WHERE build_key=%s ORDER BY animal_id LIMIT 500) '
+                    'DELETE FROM lost_gallery_documents d USING page '
+                    'WHERE d.build_key=%s AND d.animal_id=page.animal_id', (target, target)).rowcount
+                if deleted < 500:
+                    conn.execute('DELETE FROM lost_gallery_builds WHERE build_key=%s', (target,))
+                    return True
