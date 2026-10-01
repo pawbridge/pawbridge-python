@@ -4,14 +4,15 @@ import re
 from pathlib import Path
 
 from app.services.gallery_source import atomic_json
-from app.services.lost_gallery import PREFIX, CONTRACT, FOCUS_VERSION, gallery_target
+from app.services.lost_gallery import PREFIX, CONTRACT, FOCUS_VERSION, gallery_target, GalleryBuildCancelled
 
 
 class GalleryRetention:
-    def __init__(self, es, state_dir, alias, store=None):
+    def __init__(self, es, state_dir, alias, store=None, cancelled=None):
         if not re.fullmatch(PREFIX + r'[a-z0-9][a-z0-9-]{0,60}', alias):
             raise ValueError('Invalid retention alias')
         self.store = store
+        self.cancelled = cancelled
         self.es = es.options(request_timeout=30, max_retries=0) if store is None else None
         self.path = Path(state_dir) / (alias + ('-postgresql' if store is not None else '') + '-retention.json')
         self.journal = {'known': [], 'published': []}
@@ -30,12 +31,17 @@ class GalleryRetention:
     def save(self):
         atomic_json(self.path, self.journal)
 
+    def check_cancelled(self):
+        if self.cancelled is not None and self.cancelled():
+            raise GalleryBuildCancelled('Gallery retention stopped')
+
     def prune(self, keep):
         for name in list(self.journal['known']):
+            self.check_cancelled()
             if name in keep:
                 continue
             if self.store is not None:
-                if not self.store.delete_unpublished(name):
+                if not self.store.delete_unpublished(name, check_cancelled=self.check_cancelled):
                     continue
             elif self.es.indices.exists(index=name):
                 # Never delete an index in use by any alias, including another local gallery.
@@ -49,7 +55,11 @@ class GalleryRetention:
             self.save()
 
     def prepare(self, snapshot_hash):
-        target = gallery_target(snapshot_hash)
+        self.prepare_target(gallery_target(snapshot_hash))
+
+    def prepare_target(self, target):
+        if not isinstance(target, str) or not re.fullmatch(PREFIX + r'build-[a-f0-9]{24}', target):
+            raise ValueError('Invalid retention target')
         self.prune(set(self.journal['published']) | {target})
         if target not in self.journal['known']:
             if len(self.journal['known']) >= 8:
@@ -58,6 +68,8 @@ class GalleryRetention:
             self.save()  # Record before creation, so interrupted staging can be cleaned next time.
 
     def published(self, index):
+        if index not in self.journal['known']:
+            self.journal['known'].append(index)
         self.journal['published'] = [name for name in self.journal['published'] if name != index] + [index]
         self.journal['published'] = self.journal['published'][-2:]
         self.save()

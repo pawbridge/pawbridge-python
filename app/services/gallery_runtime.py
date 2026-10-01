@@ -44,7 +44,7 @@ class GalleryRefresh:
         self.stop = threading.Event()
         self.ready = ready
         self.status = {'state': 'waiting', 'lastSuccess': None}
-        self.retention = GalleryRetention(es, self.state_dir, alias, store=store)
+        self.retention = GalleryRetention(es, self.state_dir, alias, store=store, cancelled=self.stop.is_set)
         self.last_result = None
         self.etag = None  # Fetch afresh after every restart; never trust a stale local success flag.
         self.thread = threading.Thread(target=self.run, name='gallery-refresh', daemon=False)
@@ -86,15 +86,15 @@ class GalleryRefresh:
             snapshot = self.source.fetch(None, self.stop.is_set)
         if snapshot is None:
             raise ValueError('Source did not provide a complete snapshot')
-        self.retention.prepare(snapshot['snapshot_sha256'])
         self.save_status(state='building')
-        arguments = {"store": self.store} if self.store is not None else {}
+        arguments = {"store": self.store, "incremental": True} if self.store is not None else {}
         if snapshot.get('paged') is True:
             arguments['stream'] = snapshot['stream']
         result = build_gallery(self.es, lambda: self.encoder, snapshot.get('manifest_path'),
                                self.source.photo_root, self.alias, self.state_dir,
                                progress=lambda row: self.save_status(state='building', progress=row),
                                cancelled=self.stop.is_set,
+                               prepare=self.retention.prepare_target,
                                photo_provider=lambda row: self.source.photo(row, self.stop.is_set), **arguments)
         self.retention.published(result['index'])
         self.last_result = result

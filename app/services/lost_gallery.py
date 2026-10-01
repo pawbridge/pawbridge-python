@@ -88,17 +88,17 @@ class GalleryBuildCancelled(RuntimeError):
     pass
 
 
-def build_gallery(es, encoder_factory, manifest_path, photo_root, alias, state_dir, progress=None, cancelled=None, photo_provider=None, stream=None, store=None):
+def build_gallery(es, encoder_factory, manifest_path, photo_root, alias, state_dir, progress=None, cancelled=None, photo_provider=None, stream=None, store=None, incremental=False, prepare=None):
     # One GPU host is supported. All publishers share this state directory.
     import fcntl
     state = Path(state_dir)
     state.mkdir(parents=True, exist_ok=True)
     with (state / "gallery-publisher.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _build_gallery(es, encoder_factory(), manifest_path, photo_root, alias, progress, cancelled, photo_provider, stream, store)
+        return _build_gallery(es, encoder_factory(), manifest_path, photo_root, alias, progress, cancelled, photo_provider, stream, store, incremental, prepare)
 
 
-def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None, cancelled=None, photo_provider=None, stream=None, store=None):
+def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None, cancelled=None, photo_provider=None, stream=None, store=None, incremental=False, prepare=None):
     def check_cancelled():
         if cancelled and cancelled():
             raise GalleryBuildCancelled("Gallery build stopped before publication")
@@ -116,19 +116,35 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
     root = Path(photo_root).resolve(strict=True)
     target = gallery_target(snapshot_hash)
     if store is None:
+        if incremental:
+            raise ValueError('Incremental refresh requires PostgreSQL storage')
         from app.services.es_gallery_store import ElasticsearchGalleryStore
         store = ElasticsearchGalleryStore(es)
+    if incremental:
+        store, target = store.refresh_store(alias, target, snapshot_hash, total)
+    elif hasattr(store, 'build_target'):
+        target = store.build_target(target, snapshot_hash, total)
+    if prepare is not None:
+        prepare(target)  # Journal the actual delta/full target before any creation.
+
+    def result(count, encoded, reused, **details):
+        return {"alias": alias, "index": store.result_index(target) if incremental else target,
+                "records": count, "encoded": encoded, "reused": reused,
+                "snapshot_sha256": snapshot_hash, **details,
+                **(getattr(store, 'publication_stats', {}) if incremental else {})}
+
     old_index = store.begin(alias, target, snapshot_hash, total)
     check_cancelled()
     if old_index == target and store.count(target) == total:
-        return {"alias": alias, "index": target, "records": total, "encoded": 0,
-                "reused": total, "snapshot_sha256": snapshot_hash}
+        return result(total, 0, total)
     if store.completed(target, total):
         # A previously published immutable snapshot can become current again.
         store.publish(alias, target, old_index, total, check_cancelled)
-        return {"alias": alias, "index": target, "records": total, "encoded": 0,
-                "reused": total, "snapshot_sha256": snapshot_hash}
-    if stream is not None and stream.processed and store.count(target) < stream.processed:
+        return result(total, 0, total)
+    if stream is not None and stream.processed and (getattr(store, 'resume_required', False)
+                                                  or store.count(target) < stream.processed):
+        # Sparse deltas cannot prove a full source-ID prefix by their row count.
+        # Replay bounded metadata pages; staged features prevent repeated inference.
         # The staging index may have been removed after a prior process stopped.
         stream.reset_resume()
     processed = stream.processed if stream is not None else 0
@@ -209,6 +225,4 @@ def _build_gallery(es, encoder, manifest_path, photo_root, alias, progress=None,
     if stream is not None:
         stream.verify_complete()
     count = store.publish(alias, target, old_index, total, check_cancelled)
-    return {"alias": alias, "index": target, "records": count, "encoded": encoded,
-            "reused": reused, "color_processed": color_processed, "color_available": color_available,
-            "snapshot_sha256": snapshot_hash}
+    return result(count, encoded, reused, color_processed=color_processed, color_available=color_available)

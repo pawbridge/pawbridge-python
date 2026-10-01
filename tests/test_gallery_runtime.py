@@ -30,6 +30,24 @@ def sample():
 
 
 class GalleryRuntimeTest(unittest.TestCase):
+    def test_postgresql_runtime_journals_actual_refresh_target_and_enables_incremental(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Mock()
+            source = Mock(photo_root=Path(directory), downloaded=0)
+            refresh = GalleryRefresh(None, SimpleNamespace(model_version='test'), source,
+                                     'animals-lost-dinov3-sam3-runtime-test', directory, store=store)
+            refresh.retention = Mock()
+            source.fetch.return_value = {'manifest_path': 'manifest', 'etag': 'new',
+                                         'snapshot_sha256': 'a'*64}
+            result = {'index': 'stable-active', 'records': 1, 'snapshot_sha256': 'a'*64}
+            with patch('app.services.gallery_runtime.build_gallery', return_value=result) as build:
+                refresh.cycle()
+            self.assertIs(build.call_args.kwargs['store'], store)
+            self.assertIs(build.call_args.kwargs['incremental'], True)
+            self.assertEqual(build.call_args.kwargs['prepare'], refresh.retention.prepare_target)
+            refresh.retention.prepare.assert_not_called()
+            refresh.retention.published.assert_called_once_with('stable-active')
+
     def test_waiting_search_runs_before_next_gallery_image_and_lock_is_released_after_failure(self):
         gate = InferenceGate()
         order = []
@@ -145,6 +163,30 @@ class GalleryRuntimeTest(unittest.TestCase):
             resumed.prune(set(targets[1:]))
             es.indices.delete.assert_called_once_with(index=targets[0])
             self.assertEqual(resumed.journal['known'], targets[1:])
+
+    def test_pg_retention_stop_preserves_pending_journal_until_retry_completes(self):
+        from app.services.gallery_retention import GalleryRetention
+        from app.services.lost_gallery import gallery_target, GalleryBuildCancelled
+        with tempfile.TemporaryDirectory() as directory:
+            store=Mock(); source=Mock(photo_root=Path(directory),downloaded=0)
+            refresh=GalleryRefresh(None,SimpleNamespace(model_version='test'),source,
+                                   'animals-lost-dinov3-sam3-retention-test',directory,store=store)
+            retired,active=[gallery_target(c*64) for c in 'ab']
+            refresh.retention.journal={'known':[retired,active],'published':[active]}
+            refresh.retention.save()
+            def interrupted(target,*,check_cancelled):
+                refresh.stop.set()
+                check_cancelled()
+            store.delete_unpublished.side_effect=interrupted
+            with self.assertRaises(GalleryBuildCancelled):
+                refresh.retention.prune({active})
+            pending=GalleryRetention(None,directory,refresh.alias,store=store)
+            self.assertEqual(pending.journal['known'],[retired,active])
+            store.delete_unpublished.side_effect=None
+            store.delete_unpublished.return_value=True
+            pending.prune({active})
+            self.assertEqual(pending.journal,{'known':[active],'published':[active]})
+            self.assertEqual([c.args[0] for c in store.delete_unpublished.call_args_list],[retired,retired])
 
     def test_url_renewal_preserves_build_manifest_and_cleans_up_on_inference_failure(self):
         data, original = sample()
