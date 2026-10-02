@@ -11,6 +11,14 @@ class GalleryUnavailable(RuntimeError):
     pass
 
 
+class RecommendationGalleryUnavailable(GalleryUnavailable):
+    """The published gallery does not match the recommendation contract."""
+
+
+class RecommendationSourceUnavailable(GalleryUnavailable):
+    """The source animal has no features in the published gallery yet."""
+
+
 class PostgresqlGalleryStore:
     def __init__(self, pool):
         self.pool = pool
@@ -228,13 +236,13 @@ class PostgresqlGalleryStore:
             if (not head or not head[2] or head[1].get('contract') != CONTRACT
                     or head[1].get('model_version') != model_version
                     or color_version and head[1].get('coat_color_version') != color_version):
-                raise GalleryUnavailable('Matching published recommendation gallery required')
+                raise RecommendationGalleryUnavailable('Matching published recommendation gallery required')
             build = head[0]
             source = conn.execute('SELECT document FROM lost_gallery_documents '
                 'WHERE build_key=%s AND animal_id=%s AND species=%s AND model_version=%s',
                 (build, animal_id, species, model_version)).fetchone()
             if not source:
-                raise GalleryUnavailable('Source image features are not ready')
+                raise RecommendationSourceUnavailable('Source image features are not ready')
             # Source may already be adopted. Candidates must still be available now.
             # q and d refer to the same immutable build throughout this transaction.
             rows = conn.execute(
