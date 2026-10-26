@@ -1,3 +1,8 @@
+> **이 저장소는 보관되었습니다.**
+> 2026-10-26부터 PawBridge Python 서비스(유사 동물 추천, 실종동물 검색, 사진 처리)는
+> [pawbridge/pawbridge-backend-services](https://github.com/pawbridge/pawbridge-backend-services/tree/dev/python)의
+> `python/` 폴더에서 관리합니다. 이 저장소의 커밋 이력은 그 저장소에 그대로 포함되어 있으며, 이곳에서는 더 이상 변경하지 않습니다.
+
 # Pawbridge Python AI Service
 
 유기동물 이미지 기반 **유사 동물 검색** 기능을 담당하는 AI 마이크로서비스입니다.
